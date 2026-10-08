@@ -2,12 +2,12 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>FREDDY'S NIGHTSHIFT</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; user-select:none; font-family:'Courier New',monospace; }
   html, body { width:100%; height:100%; overflow:hidden; background:#000; }
-  #game { position:relative; width:100vw; height:100vh; }
+  #game { position:fixed; inset:0; width:100%; height:100%; -webkit-tap-highlight-color:transparent; touch-action:none; }
   canvas { display:block; }
   #vignette {
     position:absolute; inset:0; pointer-events:none; z-index:5;
@@ -103,6 +103,105 @@
     color:#c04040; font-size:1rem; letter-spacing:5px; text-align:center; padding:20px;
   }
   #loading .err { color:#f66; font-size:.8rem; margin-top:20px; max-width:600px; line-height:1.6; letter-spacing:1px; text-transform:none; }
+
+  /* ============ SELETOR DE MODO ============ */
+  .mode-wrap { margin-top:34px; text-align:center; }
+  .mode-title { font-size:.78rem; letter-spacing:6px; color:#8a3030; margin-bottom:12px; }
+  .mode-row { display:flex; gap:14px; justify-content:center; }
+  .mode-btn {
+    background:linear-gradient(180deg,#140404,#080202);
+    border:2px solid #3a0302; color:#7a3a3a;
+    padding:12px 30px; font-size:.95rem; letter-spacing:5px; min-width:160px;
+    cursor:pointer; transition:border-color .12s, color .12s, box-shadow .12s;
+    touch-action:manipulation; -webkit-tap-highlight-color:transparent;
+  }
+  .mode-btn small { display:block; font-size:.58rem; letter-spacing:2px; margin-top:4px; color:#5a2a2a; }
+  .mode-btn:hover { border-color:#590503; color:#b06060; }
+  .mode-btn:active { transform:translateY(1px); }
+  .mode-btn.selected {
+    border-color:#590503; color:#e0a0a0;
+    background:linear-gradient(180deg,#2a0605,#120303);
+    box-shadow:0 0 18px rgba(89,5,3,.7), inset 0 0 18px rgba(89,5,3,.55);
+  }
+  .mode-btn.selected small { color:#a05050; }
+  #menu .menu-btn { margin-top:30px; }
+
+  /* ============ AVISO DE ORIENTAÇÃO ============ */
+  #rotate-overlay {
+    position:absolute; inset:0; z-index:400; background:#050101;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:#b05050; text-align:center; padding:24px; letter-spacing:4px; font-size:1rem; line-height:1.8;
+  }
+  #rotate-overlay .phone {
+    width:46px; height:78px; border:3px solid #590503; border-radius:8px; margin-bottom:26px;
+    animation:rot 2.6s ease-in-out infinite; box-shadow:0 0 14px rgba(89,5,3,.6);
+  }
+  #rotate-overlay small { display:block; margin-top:10px; font-size:.7rem; color:#7a3a3a; letter-spacing:2px; }
+  @keyframes rot { 0%,25%{transform:rotate(0)} 60%,100%{transform:rotate(-90deg)} }
+
+  /* ============ ESTADOS DOS BOTÕES (comuns) ============ */
+  .ctrl-btn:active:not(:disabled) { transform:scale(.97); border-color:#a02020; color:#fff; }
+  #btn-monitor:active:not(:disabled) { transform:translateX(-50%) scale(.97); }
+  .ctrl-btn:disabled { opacity:.35; pointer-events:none; filter:grayscale(.6); }
+
+  /* ============ MODO CELULAR (apenas interface) ============ */
+  #game.mode-mobile {
+    --sl: max(10px, env(safe-area-inset-left));
+    --sr: max(10px, env(safe-area-inset-right));
+    --st: max(8px, env(safe-area-inset-top));
+    --sb: max(8px, env(safe-area-inset-bottom));
+    --bw: clamp(128px, 23vw, 230px);
+    --bh: clamp(42px, 13vh, 76px);
+    --gap: clamp(8px, 2.6vh, 16px);
+    --fs: clamp(.6rem, 2.3vh, .95rem);
+  }
+  .mode-mobile #hud-left, .mode-mobile #hud-right { padding:clamp(4px,1.4vh,10px) clamp(8px,1.6vw,14px); letter-spacing:1px; box-shadow:0 0 10px rgba(89,5,3,.4) inset; background:linear-gradient(180deg, rgba(20,4,4,0.72), rgba(10,2,2,0.8)); }
+  .mode-mobile #hud-left { top:var(--st); left:var(--sl); min-width:0; width:clamp(120px,22vw,200px); }
+  .mode-mobile #hud-right { top:var(--st); right:var(--sr); min-width:0; }
+  .mode-mobile .hud-label { font-size:clamp(.45rem,1.6vh,.62rem); letter-spacing:2px; }
+  .mode-mobile .power-value, .mode-mobile .time-value { font-size:clamp(1rem,4.6vh,1.7rem); }
+  .mode-mobile .power-bar-bg { margin-top:3px; height:4px; }
+  .mode-mobile .sys-row { font-size:clamp(.44rem,1.55vh,.62rem); letter-spacing:1px; margin-top:2px; }
+  .mode-mobile .usage-bar { font-size:clamp(.6rem,2.2vh,.9rem); letter-spacing:2px; margin-top:1px; }
+  .mode-mobile .night-value { font-size:clamp(.5rem,1.8vh,.7rem); letter-spacing:2px; margin-top:2px; }
+
+  .mode-mobile .ctrl-btn {
+    min-width:0; width:var(--bw); height:var(--bh);
+    padding:0 8px 0 clamp(26px,3.6vw,36px);
+    display:flex; flex-direction:column; justify-content:center;
+    font-size:var(--fs); letter-spacing:1.5px; line-height:1.15;
+    border-width:2px; touch-action:none;
+    background:linear-gradient(180deg, rgba(34,8,8,0.88), rgba(16,4,4,0.92));
+    color:#b07070;
+  }
+  .mode-mobile .ctrl-btn::before { left:clamp(8px,1.4vw,13px); width:clamp(9px,2.4vh,13px); height:clamp(9px,2.4vh,13px); margin-top:calc(clamp(9px,2.4vh,13px) / -2); }
+  .mode-mobile .ctrl-btn small { font-size:calc(var(--fs) * .82); color:#a06060; letter-spacing:1px; margin-top:3px; }
+  .mode-mobile .ctrl-btn.active { color:#fff; }
+  .mode-mobile .ctrl-btn.active small { color:#f0c0c0; }
+  .mode-mobile .ctrl-btn:hover { border-color:#590503; color:#b07070; }
+  .mode-mobile .ctrl-btn.active:hover { border-color:#c02020; color:#fff; }
+  .mode-mobile .ctrl-btn.light.active:hover { border-color:#fb0; }
+
+  .mode-mobile #btn-left-door  { left:var(--sl); right:auto; bottom:calc(var(--sb) + var(--bh) + var(--gap)); }
+  .mode-mobile #btn-left-light { left:var(--sl); right:auto; bottom:var(--sb); }
+  .mode-mobile #btn-right-door  { right:var(--sr); left:auto; bottom:calc(var(--sb) + var(--bh) + var(--gap)); }
+  .mode-mobile #btn-right-light { right:var(--sr); left:auto; bottom:var(--sb); }
+  .mode-mobile #btn-monitor {
+    left:50%; bottom:var(--sb); transform:translateX(-50%);
+    width:clamp(170px,30vw,300px); height:var(--bh);
+  }
+  .mode-mobile #btn-monitor:active:not(:disabled) { transform:translateX(-50%) scale(.97); }
+  .mode-mobile .menu-btn, .mode-mobile .mode-btn { touch-action:manipulation; }
+
+  /* telas baixas (celulares em paisagem) – menu compacto */
+  @media (max-height:480px) {
+    #menu h1 { font-size:clamp(1.4rem,8vh,2.4rem); letter-spacing:6px; text-align:center; }
+    #menu .sub { margin-top:6px; font-size:.7rem; letter-spacing:3px; }
+    .mode-wrap { margin-top:14px; }
+    .mode-title { margin-bottom:8px; font-size:.65rem; }
+    .mode-btn { padding:8px 20px; min-width:130px; font-size:.8rem; }
+    #menu .menu-btn { margin-top:14px; padding:10px 30px; min-width:240px; font-size:.85rem; }
+  }
 </style>
 </head>
 <body>
@@ -141,7 +240,19 @@
   <div id="menu">
     <h1>FREDDY'S NIGHTSHIFT</h1>
     <p class="sub">"Algumas noites são melhores esquecidas."</p>
+    <div class="mode-wrap">
+      <div class="mode-title">ESCOLHA O MODO</div>
+      <div class="mode-row">
+        <button class="mode-btn" id="mode-pc" data-mode="pc">PC<small>MOUSE + TECLADO</small></button>
+        <button class="mode-btn" id="mode-mobile" data-mode="mobile">CELULAR<small>TOQUE · HORIZONTAL</small></button>
+      </div>
+    </div>
     <button class="menu-btn" id="btn-start">INICIAR TURNO</button>
+  </div>
+
+  <div id="rotate-overlay" class="hidden">
+    <div class="phone"></div>
+    <div>GIRE O CELULAR<br>PARA A HORIZONTAL<small>O jogo fica pausado até o celular estar deitado.</small></div>
   </div>
 </div>
 
@@ -199,7 +310,7 @@ var Game = {
   power: 100, usage: 1,
   doors: { left: false, right: false },
   lights: { left: false, right: false },
-  monitorOpen: false,
+  monitorOpen: false, paused: false,
   ambientTime: 0, lastFrame: 0,
   doorAnim: { left: 0, right: 0 },
   doorTarget: { left: 0, right: 0 },
@@ -1600,6 +1711,76 @@ function setupLighting() {
 }
 
 /* ================================================================
+   MODO DE JOGO (PC / CELULAR) — só muda interface e forma de entrada.
+   Toda a lógica continua em toggleDoor / toggleLight / toggleMonitor.
+   ================================================================ */
+var Mode = { current: 'pc' };
+
+function detectDefaultMode() {
+  try {
+    var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    var noHover = window.matchMedia && window.matchMedia('(hover: none)').matches;
+    if (coarse && noHover) return 'mobile';
+  } catch (e) {}
+  return 'pc';
+}
+function loadSavedMode() {
+  try { var m = localStorage.getItem('fn_mode'); if (m === 'pc' || m === 'mobile') return m; } catch (e) {}
+  return null;
+}
+function setMode(mode) {
+  Mode.current = (mode === 'mobile') ? 'mobile' : 'pc';
+  try { localStorage.setItem('fn_mode', Mode.current); } catch (e) {}
+  var g = document.getElementById('game');
+  g.classList.toggle('mode-mobile', Mode.current === 'mobile');
+  g.classList.toggle('mode-pc', Mode.current === 'pc');
+  document.getElementById('mode-pc').classList.toggle('selected', Mode.current === 'pc');
+  document.getElementById('mode-mobile').classList.toggle('selected', Mode.current === 'mobile');
+  refreshOrientation();
+  applyViewport();
+}
+function isPortrait() { return window.innerHeight > window.innerWidth; }
+function refreshOrientation() {
+  var needRotate = Mode.current === 'mobile' && isPortrait();
+  document.getElementById('rotate-overlay').classList.toggle('hidden', !needRotate);
+  Game.paused = needRotate && Game.running;
+}
+// Tenta tela cheia + travar paisagem (só funciona com gesto do usuário; falhar é normal)
+function tryLockLandscape() {
+  try {
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    var p = req ? req.call(el) : null;
+    var lock = function() {
+      try {
+        if (screen.orientation && screen.orientation.lock) {
+          var r = screen.orientation.lock('landscape');
+          if (r && r.catch) r.catch(function() {});
+        }
+      } catch (e) {}
+    };
+    if (p && p.then) p.then(lock, lock); else lock();
+    if (p && p.catch) p.catch(function() {});
+  } catch (e) {}
+}
+// Câmera: no celular, se a tela for mais "quadrada" que 16:9, aumenta o FOV vertical
+// para manter o mesmo enquadramento horizontal de 16:9. No PC nada muda.
+function applyViewport() {
+  if (!renderer || !camera) return;
+  var w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  var baseFov = 78;
+  if (Mode.current === 'mobile' && camera.aspect < 16 / 9) {
+    var hf = 2 * Math.atan(Math.tan(baseFov * Math.PI / 360) * (16 / 9));
+    baseFov = 2 * Math.atan(Math.tan(hf / 2) / camera.aspect) * 180 / Math.PI;
+    baseFov = Math.min(baseFov, 100);
+  }
+  camera.fov = baseFov;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+
+/* ================================================================
    INIT
    ================================================================ */
 function showError(msg) {
@@ -1666,11 +1847,15 @@ function init() {
       if (e.code === 'Space') { e.preventDefault(); toggleMonitor(); }
     });
 
-    window.addEventListener('resize', function() {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    });
+    // Seleção de modo (a escolha do jogador tem prioridade sobre a detecção automática)
+    document.getElementById('mode-pc').addEventListener('click', function() { setMode('pc'); });
+    document.getElementById('mode-mobile').addEventListener('click', function() { setMode('mobile'); });
+    setMode(loadSavedMode() || detectDefaultMode());
+
+    function onViewportChange() { refreshOrientation(); applyViewport(); }
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('orientationchange', function() { setTimeout(onViewportChange, 150); });
+    document.addEventListener('contextmenu', function(e) { if (Mode.current === 'mobile') e.preventDefault(); });
 
     document.getElementById('loading').classList.add('hidden');
     document.getElementById('vignette').classList.remove('hidden');
@@ -1748,7 +1933,9 @@ function updateHUD() {
    START
    ================================================================ */
 function startNight() {
+  if (Mode.current === 'mobile') tryLockLandscape();
   Game.running = true;
+  Game.paused = false;
   Game.lastFrame = performance.now();
   Game.hour = 0; Game.hourProgress = 0;
   Game.power = 100; Game.usage = 1;
@@ -1757,6 +1944,8 @@ function startNight() {
   document.getElementById('hud').classList.remove('hidden');
   document.getElementById('controls').classList.remove('hidden');
   updateHUD();
+  refreshOrientation();
+  applyViewport();
   requestAnimationFrame(loop);
 }
 
@@ -1903,6 +2092,7 @@ function update(dt) {
    ================================================================ */
 function loop(now) {
   if (!Game.running) return;
+  if (Game.paused) { Game.lastFrame = now; requestAnimationFrame(loop); return; }
   var dt = Math.min(0.1, (now - Game.lastFrame) / 1000);
   Game.lastFrame = now;
   update(dt);
