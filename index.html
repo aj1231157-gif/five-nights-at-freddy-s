@@ -688,7 +688,7 @@ var Game = {
   power: 100, usage: 1,
   doors: { left: false, right: false },
   lights: { left: false, right: false },
-  monitorOpen: false, paused: false,
+  monitorOpen: false, paused: false, over: false,
   ambientTime: 0, lastFrame: 0,
   doorAnim: { left: 0, right: 0 },
   doorTarget: { left: 0, right: 0 },
@@ -730,6 +730,7 @@ function freezeStaticScene() {
   if (objs.door_left) dyn.push(objs.door_left);
   if (objs.door_right) dyn.push(objs.door_right);
   if (fanBlades) dyn.push(fanBlades);
+  NS.dyn.forEach(function(d) { dyn.push(d); });
   dyn.forEach(function(d) { d.traverse(function(o) { o.userData._dyn = true; }); });
   scene.traverse(function(o) { if (o !== scene && !o.userData._dyn) o.matrixAutoUpdate = false; });
   scene.autoUpdate = false;
@@ -1089,7 +1090,7 @@ function buildCorridor(side) {
   addMesh(box(T, H, ifr), wallMat, s * (S.ROOM_W/2 + T/2), H/2, (frontZ + z1) / 2);
   var capW = XO + T - XI, capX = s * (XI + XO + T) / 2;
   addMesh(box(capW, H, T), MAT.metalDark, capX, H/2, z1 + T/2); // ponta da frente (escura)
-  addMesh(box(capW, H, T), MAT.wall, capX, H/2, z0 - T/2);      // fundo atrás da porta
+  // (fundo removido: o corredor agora desemboca no corredor principal do prédio)
 
   // Rodapé escuro / lambri
   addMesh(box(0.02, 1.05, LEN), MAT.wainscot, s * (XO - 0.01), 0.525, zc);
@@ -2308,6 +2309,7 @@ function init() {
     buildCeilingLamp();
     buildWallDecor();
     setupLighting();
+    nbuild();   // prédio completo + animatrônicos + câmeras
 
     // Eventos
     document.getElementById('btn-left-door').addEventListener('pointerdown', function(e) { if (e.pointerType === 'mouse' && e.button !== 0) return; e.preventDefault(); toggleDoor('left'); });
@@ -2350,19 +2352,20 @@ function getDoorLedMat(side) {
    CONTROLES
    ================================================================ */
 function toggleDoor(side) {
-  if (!Game.running) return;
+  if (!Game.running || Game.over) return; NS.idle = 0;
   Game.doors[side] = !Game.doors[side];
   Game.doorTarget[side] = Game.doors[side] ? 1 : 0;
   updateHUD();
 }
 function toggleLight(side) {
-  if (!Game.running) return;
+  if (!Game.running || Game.over) return; NS.idle = 0;
   Game.lights[side] = !Game.lights[side];
   updateHUD();
 }
 function toggleMonitor() {
-  if (!Game.running) return;
+  if (!Game.running || Game.over) return; NS.idle = 0;
   Game.monitorOpen = !Game.monitorOpen;
+  NS.show(Game.monitorOpen);
   updateHUD();
 }
 
@@ -2441,6 +2444,7 @@ function _startNightCore() {
   if (Mode.current === 'mobile') tryLockLandscape();
   Game.running = true;
   Game.paused = false;
+  NA.init();
   Game.lastFrame = performance.now();
   Game.hour = 0; Game.hourProgress = 0;
   Game.power = 100; Game.usage = 1;
@@ -2465,13 +2469,14 @@ function _startNightCore() {
    UPDATE
    ================================================================ */
 function update(dt) {
+  if (Game.over) { NS.jumpUpdate(dt); return; }
   Game.ambientTime += dt;
 
   Game.hourProgress += dt / Game.HOUR_DURATION;
   if (Game.hourProgress >= 1) {
     Game.hourProgress = 0;
     Game.hour++;
-    if (Game.hour >= 6) Game.hour = 0;
+    if (Game.hour >= 6) { Game.hour = 6; Game.hourProgress = 0; Game.over = true; NS.win(); }
   }
 
   var usage = 1;
@@ -2598,6 +2603,7 @@ function update(dt) {
     objs.monLight.intensity += (target - objs.monLight.intensity) * dt * 4;
   }
 
+  NS.update(dt);
   updateHUD();
 }
 
@@ -2645,9 +2651,763 @@ function loop(now) {
     adaptResolution(frameMs);
   }
 
-  renderer.render(scene, camera);
+  renderer.render(scene, (Game.monitorOpen && NS.cam) ? NS.cam : camera);
   requestAnimationFrame(loop);
 }
+
+
+/* ================================================================
+   NIGHTSHIFT — PRÉDIO COMPLETO + CÂMERAS (UMA ÚNICA CENA 3D)
+   Tudo que depende de coordenadas fica em MAP (salas, paredes, câmeras, rotas).
+   Convenção: metros, -Z = norte (fundo da sala de segurança), yaw 0 = olha para o norte, + = direita.
+   ================================================================ */
+var NS = { cams: [], anims: [], dyn: [], act: 0, on: false, adj: {}, dist: {}, gl: 6, idle: 0, lvl: 0, col: [], shake: 0 };
+var NH = 2.7, NT = 0.14, ND = 2.15;
+// ---- PLANTA: uma escala (m/px) e uma origem para tudo. x = (px-581)*SC, z = -3.6+(py-455)*SC (px/py = pixels da imagem da planta).
+// O escritório e os corredores originais continuam exatamente onde estavam (corredores: z -3.6 → 3.0, x ±2.39 → ±5.19). ----
+var SC = 0.02317;
+function PX(p) { return (p - 581) * SC; }
+function PZ(p) { return -3.6 + (p - 455) * SC; }
+function PR(a, b, c, d, n, col) { return [PX(a), PZ(b), PX(c), PZ(d), n, col]; }
+var CVX = PX(295), CVZ = PZ(345);
+var TABLES = [[525, 245], [605, 245], [685, 245], [445, 320], [525, 320], [605, 320], [685, 320]].map(function (t) { return [PX(t[0]), PZ(t[1])]; });
+function CM(id, n, x, y, yaw, lim, lc, li, lx, ly, fov, o) {
+  var c = { id: id, n: n, p: [PX(x), 2.5, PZ(y)], yaw: yaw, lim: lim, lc: lc, li: li, lp: [PX(lx), 2.5, PZ(ly)], fov: fov };
+  if (o) for (var k in o) c[k] = o[k]; return c;
+}
+var MAP = {
+  // sala: [x0, z0, x1, z1, nome, cor do piso]
+  rooms: {
+    stage: PR(352, 8, 815, 200, 'PALCO PRINCIPAL', 0x3a2a1c), salao: PR(385, 200, 767, 455, 'ÁREA DE REFEIÇÕES', 0xc9bfae),
+    back: PR(22, 22, 318, 262, 'BASTIDORES', 0x5c574f), depo: PR(22, 262, 170, 398, 'DEPÓSITO', 0x5c574f), vest: PR(170, 262, 230, 297, '', 0x6e665c), pass: PR(318, 215, 385, 262, '', 0x6e665c),
+    cove: PR(208, 297, 385, 455, 'COVE DO FOXY', 0x5c4a3a),
+    rTop: PR(767, 215, 955, 298, 'BANHEIROS', 0xaab2ae), men: PR(767, 298, 862, 365, 'HOMENS', 0xaab2ae), wash: PR(862, 298, 902, 365, '', 0xaab2ae), wom: PR(902, 298, 955, 365, 'MULHERES', 0xaab2ae),
+    lobby: PR(767, 365, 955, 455, '', 0xaab2ae), kdoor: PR(955, 385, 983, 435, '', 0xa4aaa4), kit: PR(983, 215, 1143, 455, 'COZINHA', 0xa4aaa4),
+    corrL: [-5.19, -3.6, -2.39, 3.0, 'CORREDOR OESTE'], corrR: [2.39, -3.6, 5.19, 3.0, 'CORREDOR LESTE'], sec: [-2.25, -2.5, 2.25, 2.5, 'ESCRITÓRIO']   // corredores e escritório: já existiam
+  },
+  // paredes: [eixo, coordenada fixa, de, até, vãos [centro, largura]] — o visual e a colisão saem desta mesma lista
+  walls: [
+    ['x', PZ(8), PX(352), PX(815), []], ['z', PX(352), PZ(8), PZ(200), []], ['z', PX(815), PZ(8), PZ(200), []],           // palco (frente aberta para o salão)
+    ['x', PZ(200), PX(352), PX(385), []], ['x', PZ(200), PX(767), PX(815), []],
+    ['x', PZ(22), PX(22), PX(318), []], ['z', PX(22), PZ(22), PZ(398), []], ['z', PX(318), PZ(22), PZ(262), [[PZ(238), 1.1]]],   // bastidores + depósito
+    ['x', PZ(262), PX(22), PX(318), [[PX(122), 1.0], [PX(200), 0.9]]], ['x', PZ(398), PX(22), PX(170), []], ['z', PX(170), PZ(262), PZ(398), []],
+    ['z', PX(230), PZ(262), PZ(297), []], ['x', PZ(297), PX(170), PX(208), []],
+    ['x', PZ(215), PX(318), PX(385), []], ['x', PZ(262), PX(318), PX(385), []],                                              // passagem bastidores → salão
+    ['x', PZ(297), PX(208), PX(385), []], ['z', PX(208), PZ(297), PZ(455), []],                                              // cove
+    ['z', PX(385), PZ(200), PZ(455), [[PZ(238), 1.1], [PZ(410), 1.1]]],                                                      // salão ↔ passagem / cove
+    ['x', PZ(455), PX(208), PX(1143), [[-3.465, 2.15], [3.335, 1.95]]],                                                      // fachada sul: cove, salão (vãos dos corredores), banheiros, cozinha
+    ['z', PX(767), PZ(200), PZ(455), [[PZ(410), 1.1]]], ['x', PZ(215), PX(767), PX(955), []], ['z', PX(955), PZ(215), PZ(455), [[PZ(410), 1.1]]],   // bloco dos banheiros
+    ['x', PZ(298), PX(767), PX(955), [[PX(882), 0.9]]], ['z', PX(862), PZ(298), PZ(365), [[PZ(335), 0.8]]], ['z', PX(902), PZ(298), PZ(365), [[PZ(335), 0.8]]],
+    ['x', PZ(365), PX(767), PX(862), []], ['x', PZ(365), PX(902), PX(955), []],
+    ['x', PZ(385), PX(955), PX(983), []], ['x', PZ(435), PX(955), PX(983), []],                                              // porta banheiros ↔ cozinha
+    ['x', PZ(215), PX(983), PX(1143), []], ['z', PX(1143), PZ(215), PZ(455), []], ['z', PX(983), PZ(215), PZ(455), [[PZ(410), 1.1]]]   // cozinha
+  ],
+  // câmeras recriadas nos marcadores da planta (id da planta; 1C duplicado → o do salão virou 1D)
+  cams: [
+    CM('1A', 'PALCO PRINCIPAL', 578, 82, 180, 40, 0xffc890, 1.5, 578, 125, 95),
+    CM('1B', 'ÁREA DE REFEIÇÕES', 437, 230, 126, 32, 0xffd2a0, 1.6, 560, 300, 70),
+    CM('1D', 'ÁREA DE REFEIÇÕES · LESTE', 688, 320, -85, 30, 0xffd2a0, 1.4, 540, 330, 70),
+    CM('2A', 'CORREDOR OESTE', 421, 512, 180, 22, 0xcfe0ff, 1.0, 421, 570, 75),
+    CM('2B', 'CORREDOR LESTE', 735, 512, 180, 22, 0xcfe0ff, 1.0, 735, 570, 75),
+    CM('3', 'BANHEIROS', 858, 228, 175, 30, 0xe6e8c8, 1.2, 858, 270, 75),
+    CM('4B', 'COZINHA', 1025, 245, 160, 30, 0xe8eadc, 1.3, 1065, 330, 75),
+    CM('5', 'BASTIDORES', 160, 207, 0, 40, 0xffb878, 1.0, 166, 140, 80),
+    CM('1C', 'COVE DO FOXY', 237, 415, 38, 28, 0xffb878, 1.3, 300, 380, 70, { cove: true }),
+    CM('6', 'DEPÓSITO', 123, 350, 0, 40, 0xffb878, 0.9, 100, 320, 80),
+    CM('7', 'ESCRITÓRIO', 0, 0, 195, 40, 0xffd2a0, 1.2, 0, 0, 80, { p: [1.25, 2.5, -2.2], lp: [0, 2.4, 0.4] })
+  ],
+  // rotas dos animatrônicos: nós [x, z] e ligações físicas (todas passam por vãos reais; validadas contra as colisões)
+  nodes: {
+    stageL: [PX(440), PZ(130)], stageC: [PX(578), PZ(130)], stageR: [PX(708), PZ(130)], stageF: [-0.37, -9.5],
+    salao: [-0.37, -7.6], salaoS: [-0.37, -5.4], corrM: [-0.37, -4.5], jL: [-3.6, -4.5], jR: [3.3, -4.5],
+    cL: [-3.7, -2.4], dL: [-3.3, -1.3], cR: [3.8, -2.4], dR: [3.3, -1.3], inL: [-1.5, -1.3], inR: [1.5, -1.3],
+    salaoW: [PX(882), PZ(410)], sBM: [PX(882), PZ(335)], sBW: [PX(882), PZ(255)], bathM: [PX(815), PZ(335)], bathW: [PX(925), PZ(335)],
+    kitE: [PX(1005), PZ(410)], kit: [PX(1065), PZ(360)], cove: [CVX, -6.9], coveF: [CVX, -5.4], coveD: [-4.05, -4.64]
+  },
+  edges: [['stageL', 'stageC'], ['stageC', 'stageR'], ['stageL', 'stageF'], ['stageC', 'stageF'], ['stageR', 'stageF'], ['stageF', 'salao'], ['salao', 'salaoS'], ['salaoS', 'corrM'],
+    ['corrM', 'jL'], ['corrM', 'jR'], ['jL', 'cL'], ['cL', 'dL'], ['jR', 'cR'], ['cR', 'dR'], ['dL', 'inL'], ['dR', 'inR'],
+    ['jR', 'salaoW'], ['salaoW', 'sBM'], ['sBM', 'bathM'], ['sBM', 'bathW'], ['sBM', 'sBW'], ['salaoW', 'kitE'], ['kitE', 'kit'],
+    ['cove', 'coveF'], ['coveF', 'coveD'], ['coveD', 'jL']]
+};
+
+// ---------- materiais e helpers (reaproveita MAT/texturas do jogo) ----------
+var NM = {
+  wood: makeMat(0x4a2e18, 0.85, 0.05), dwood: makeMat(0x2a190c, 0.9, 0.04), cloth: makeMat(0x5a1018, 0.95, 0),
+  steel: makeMat(0x8a8d90, 0.45, 0.7), tile: makeMat(0xb7beb9, 0.5, 0.05), cbox: makeMat(0x7a5a34, 0.92, 0), white: makeMat(0xcfc9bd, 0.55, 0.05),
+  stage: makeMat(0x2e1c10, 0.8, 0.05), eye: makeMat(0xffffff, 0.3, 0, { emissive: 0xffffff, emissiveIntensity: 0.6 }),
+  scr: makeMat(0x000000, 0.3, 0, { emissive: 0x6fb08a, emissiveIntensity: 1.3 }), black: makeMat(0x0a0a08, 0.8, 0.05)
+};
+NM.wall = makeMat(0xb4ab9f, 0.93, 0.04, { map: nwallTex() });
+NM.woodT = makeMat(0xffffff, 0.68, 0.05, { map: makeWoodTex() });
+function nbx(m, w, h, d, x, y, z) { return addMesh(box(w, h, d), m, x, y + h / 2, z); }
+function nposter(x, y, z, ry, w, h, col) {
+  var m = addMesh(plane(w, h), makeMat(col, 0.95, 0), x, y, z); m.rotation.y = ry; return m;
+}
+function nlamp(x, z, mat) { addMesh(cyl(0.22, 0.22, 0.05, 12), mat || MAT.bulbWarm, x, NH - 0.03, z); }
+
+// parede: pintura envelhecida, umidade, manchas, rachaduras, descascado e sujeira no teto/rodapé
+function nwallTex() {
+  return makeTexture(512, function (ctx, w, h) {
+    var i, x, y;
+    ctx.fillStyle = '#8a8176'; ctx.fillRect(0, 0, w, h);
+    for (i = 0; i < 26; i++) blotch(ctx, rnd(0, w), rnd(0, h), rnd(20, 90), '120,108,90', rnd(0.05, 0.14));      // variação de tom
+    var gr = ctx.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, 'rgba(20,14,8,.4)'); gr.addColorStop(0.2, 'rgba(20,14,8,0)'); gr.addColorStop(0.78, 'rgba(20,14,8,0)'); gr.addColorStop(1, 'rgba(20,14,8,.55)');
+    ctx.fillStyle = gr; ctx.fillRect(0, 0, w, h);                                                                 // sujeira no alto e no pé da parede
+    for (i = 0; i < 5; i++) { ctx.fillStyle = 'rgba(40,28,14,' + rnd(0.05, 0.13) + ')'; ctx.fillRect(rnd(0, w), rnd(0, h * 0.3), rnd(3, 14), rnd(60, 220)); }   // marcas de umidade
+    for (i = 0; i < 6; i++) blotch(ctx, rnd(0, w), rnd(h * 0.4, h), rnd(15, 45), '30,20,10', rnd(0.1, 0.25));    // manchas
+    ctx.strokeStyle = 'rgba(15,10,6,.55)'; ctx.lineWidth = 1;
+    for (i = 0; i < 3; i++) { x = rnd(0, w); y = rnd(0, h * 0.6); ctx.beginPath(); ctx.moveTo(x, y); for (var j = 0; j < 7; j++) { x += rnd(-14, 14); y += rnd(6, 22); ctx.lineTo(x, y); } ctx.stroke(); }   // rachaduras
+    for (i = 0; i < 4; i++) { x = rnd(0, w); y = rnd(0, h); ctx.fillStyle = 'rgba(176,168,150,.3)'; ctx.beginPath(); ctx.ellipse(x, y, rnd(8, 26), rnd(5, 16), rnd(0, 3), 0, 6.3); ctx.fill(); ctx.fillStyle = 'rgba(40,30,20,.35)'; ctx.beginPath(); ctx.ellipse(x + 2, y + 2, rnd(5, 18), rnd(3, 10), rnd(0, 3), 0, 6.3); ctx.fill(); }   // pintura descascada
+    scratches(ctx, w, h, 40, '0,0,0', 0.18, 50); addNoise(ctx, w, h, 500, 0.12, 2);
+  }, 1, 1);
+}
+// escala as UVs (3 m × altura da sala por repetição) com deslocamento aleatório: a mesma mancha não se repete
+function nuv(geo, w, h, d, ox, oy) {
+  var uv = geo.attributes.uv, dm = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]];
+  for (var f = 0; f < 6; f++) for (var v = 0; v < 4; v++) { var i = f * 4 + v; uv.setXY(i, uv.getX(i) * dm[f][0] / 3 + ox, uv.getY(i) * dm[f][1] / NH + oy); }
+  uv.needsUpdate = true; return geo;
+}
+// piso: ladrilhos com variação, chanfro, juntas, rachaduras, sujeira desigual e riscos
+function nfloor(k, col, w, d) {
+  var c1 = [(col >> 16) & 255, (col >> 8) & 255, col & 255], c2 = k === 'salao' ? [52, 46, 42] : [c1[0] * 0.82, c1[1] * 0.82, c1[2] * 0.82];
+  var sz = (w * d > 20 && window.innerWidth >= 900) ? 1024 : 512;
+  var t = makeTexture(sz, function (ctx, W, H) {
+    var n = 8, s = W / n, i, j, lw = W / 340;
+    for (i = 0; i < n; i++) for (j = 0; j < n; j++) {
+      var b = (i + j) % 2 ? c2 : c1, v = rnd(-12, 12);
+      ctx.fillStyle = 'rgb(' + (b[0] + v | 0) + ',' + (b[1] + v | 0) + ',' + (b[2] + v | 0) + ')'; ctx.fillRect(i * s, j * s, s, s);
+      ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fillRect(i * s, j * s, s, lw); ctx.fillRect(i * s, j * s, lw, s);
+      if (Math.random() < 0.07) { ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.beginPath(); var x = i * s + rnd(8, s - 8), y = j * s + rnd(4, 20); ctx.moveTo(x, y); for (var q = 0; q < 4; q++) { x += rnd(-10, 10); y += rnd(10, 26); ctx.lineTo(x, y); } ctx.stroke(); }
+    }
+    ctx.strokeStyle = 'rgba(8,6,4,.7)'; ctx.lineWidth = lw;
+    for (i = 0; i <= n; i++) { ctx.beginPath(); ctx.moveTo(i * s, 0); ctx.lineTo(i * s, H); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, i * s); ctx.lineTo(W, i * s); ctx.stroke(); }
+    for (i = 0; i < 46; i++) blotch(ctx, rnd(0, W), rnd(0, H), rnd(14, 80) * W / 1024, '22,16,9', rnd(0.06, 0.2));
+    scratches(ctx, W, H, 60, '0,0,0', 0.2, 70); addNoise(ctx, W, H, 1500, 0.1, 2);
+  }, w / 4, d / 4);
+  t.anisotropy = 4; return makeMat(0xffffff, 0.5, 0.08, { map: t });
+}
+
+// parede com vãos: pedaços cheios + verga + batentes (portas abertas, espaço real atrás) + rodapé
+function nwall(ax, c, a, b, gaps) {
+  var g = (gaps || []).slice().sort(function (p, q) { return p[0] - q[0]; }), cur = a;
+  function seg(m, p, q, y0, y1, th) {
+    if (q - p < 0.01) return; var L = q - p, mid = (p + q) / 2, hh = y1 - y0, w = ax === 'x' ? L : th, d = ax === 'x' ? th : L;
+    var geo = box(w, hh, d); if (m === NM.wall) nuv(geo, w, hh, d, Math.random(), y0 / NH);
+    addMesh(geo, m, ax === 'x' ? mid : c, y0 + hh / 2, ax === 'x' ? c : mid);
+    if (m === NM.wall && y0 === 0) addMesh(box(ax === 'x' ? L : th + 0.05, 0.12, ax === 'x' ? th + 0.05 : L), MAT.trim, ax === 'x' ? mid : c, 0.06, ax === 'x' ? c : mid);
+  }
+  g.forEach(function (d) {
+    var p = d[0] - d[1] / 2, q = d[0] + d[1] / 2;
+    seg(NM.wall, cur, p, 0, NH, NT); seg(NM.wall, p, q, ND, NH, NT);
+    seg(MAT.trim, p - 0.06, p, 0, ND + 0.06, NT + 0.05); seg(MAT.trim, q, q + 0.06, 0, ND + 0.06, NT + 0.05); seg(MAT.trim, p, q, ND, ND + 0.06, NT + 0.05);
+    cur = q;
+  });
+  seg(NM.wall, cur, b, 0, NH, NT);
+}
+
+function nbuild() {
+  var R = MAP.rooms;
+  // pisos e tetos
+  Object.keys(R).forEach(function (k) {
+    var r = R[k]; if (r[5] === undefined) return;
+    var w = r[2] - r[0], d = r[3] - r[1], cx = (r[0] + r[2]) / 2, cz = (r[1] + r[3]) / 2;
+    addMesh(box(w, 0.12, d), nfloor(k, r[5], w, d), cx, -0.06, cz);
+    addMesh(box(w, 0.12, d), MAT.ceiling, cx, NH + 0.06, cz);
+  });
+  MAP.walls.forEach(function (w) { nwall(w[0], w[1], w[2], w[3], w[4]); });
+  // continuação das paredes externas dos corredores existentes (z=-3.6 → -6.8)
+  // (as paredes laterais ±5.26 já estão na lista acima)
+
+  nfurn();
+
+  // ---- ANIMATRÔNICOS (um único estado/posição por personagem) ----
+  [['Freddy', 0x6b3f1f, 'f', 'stageC', 'dR', 0.55, [9, 16]], ['Bonnie', 0x5a4a9a, 'b', 'stageL', 'dL', 0.8, [5, 11]],
+   ['Chica', 0xd9b42a, 'c', 'stageR', 'dR', 0.75, [6, 12]], ['Foxy', 0x8a2a1a, 'x', 'cove', 'dL', 1.1, [8, 18]]].forEach(function (d) {
+    var a = nanim(d); NS.anims.push(a);
+  });
+  nsetup();
+
+  // ---- câmeras reais + pool fixo de luzes (a contagem de luzes nunca muda → sem recompilar shaders) ----
+  NS.cam = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.05, 60);
+  NS.cam.rotation.order = 'YXZ';
+  NS.amb = new THREE.AmbientLight(0x4a4540, 0);
+  NS.key = new THREE.SpotLight(0xffc890, 0, 18, 1.15, 0.7, 1.4); NS.fill = new THREE.PointLight(0xa8c0d0, 0, 8, 1.5);
+  NS.key.castShadow = true; NS.key.shadow.mapSize.set(window.innerWidth < 900 ? 512 : 1024, window.innerWidth < 900 ? 512 : 1024);
+  NS.key.shadow.bias = -0.002; NS.key.shadow.camera.near = 0.4; NS.key.shadow.camera.far = 18; scene.add(NS.key.target); NS.dyn.push(NS.key.target);
+  [NS.amb, NS.key, NS.fill].forEach(function (l) { scene.add(l); NS.dyn.push(l); });
+  MAP.cams.forEach(function (c) { c.base = c.yaw * Math.PI / 180; c.off = 0; c.dir = Math.random() < 0.5 ? -1 : 1; c.av = 0; });
+  nui();
+}
+
+
+// mobiliário e decoração de cada sala (tudo posicionado pela planta: PX/PZ)
+function nfurn() {
+  var T = NM.woodT, D = NM.dwood, i, k;
+  // ---- PALCO ----
+  var x0 = PX(352) + 0.2, x1 = PX(815) - 0.2, z0 = PZ(8) + 0.2, z1 = -9.8, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
+  nbx(NM.stage, w, 0.4, d, cx, 0, cz); nbx(D, w + 0.1, 0.05, d + 0.1, cx, 0.4, cz);
+  for (i = x0 + 0.4; i < x1; i += 0.8) nbx(D, 0.7, 0.28, 0.03, i, 0.06, z1 + 0.02);
+  for (i = 0; i < 21; i++) nbx(i % 2 ? D : T, 0.5, 2.3, 0.04, x0 + 0.25 + i * 0.5, 0.45, z0 + 0.05);
+  [-1, 1].forEach(function (s) { for (k = 0; k < 6; k++) nbx(NM.cloth, 0.16, 2.6, 0.55 + Math.random() * 0.2, cx + s * (w / 2 - 0.15 - k * 0.14), 0, z0 + 0.5); });
+  nbx(NM.cloth, w, 0.4, 0.3, cx, 2.3, z0 + 0.3); nbx(MAT.metalDark, w, 0.08, 0.08, cx, 2.2, z1 - 0.9);
+  [PX(440), PX(578), PX(708)].forEach(function (x) { addMesh(cyl(0.09, 0.14, 0.26, 12), MAT.metalDark, x, 2.05, z1 - 0.9).rotation.x = -0.5; addMesh(cyl(0.085, 0.085, 0.01, 12), MAT.bulbWarm, x, 1.93, z1 - 0.83).rotation.x = -0.5; });
+  [x0 + 0.6, x1 - 0.6].forEach(function (x) { nbx(MAT.plasticBlack, 0.55, 0.85, 0.42, x, 0.45, z0 + 1.0); addMesh(cyl(0.17, 0.17, 0.03, 18), MAT.rubber, x, 1.15, z0 + 1.22).rotation.x = Math.PI / 2; });
+  nposter(cx, 2.0, z0 + 0.08, 0, 3.0, 0.45, 0x8a6a2a); nbx(NM.stage, 1.6, 0.2, 0.45, -0.37, 0, z1 + 0.22);
+  [-3.4, 0, 3.4].forEach(function (x) { nlamp(x, -11.8); });
+  // ---- ÁREA DE REFEIÇÕES ----
+  TABLES.forEach(function (p, j) {
+    var t = new THREE.Group(); t.position.set(p[0], 0, p[1]); t.rotation.y = rnd(-0.1, 0.1); scene.add(t);
+    addMesh(box(1.0, 0.06, 1.0), T, 0, 0.72, 0, t); addMesh(box(1.05, 0.025, 1.05), D, 0, 0.68, 0, t); addMesh(cyl(0.055, 0.08, 0.66, 10), MAT.metalDark, 0, 0.35, 0, t);
+    [0, Math.PI / 2].forEach(function (r) { addMesh(box(0.7, 0.035, 0.09), MAT.metalDark, 0, 0.02, 0, t).rotation.y = r; });
+    addMesh(new THREE.ConeGeometry(0.1, 0.25, 8), makeMat([0x2a5a9a, 0xb02a2a, 0xc9a02a][j % 3], 0.8, 0), 0.15, 0.88, -0.1, t); addMesh(cyl(0.11, 0.09, 0.03, 12), NM.white, -0.2, 0.765, 0.15, t);
+    [-0.7, 0.7].forEach(function (o) {
+      var ch = new THREE.Group(); ch.position.set(p[0] + rnd(-0.07, 0.07), 0, p[1] + o); ch.rotation.y = (o > 0 ? Math.PI : 0) + rnd(-0.25, 0.25); scene.add(ch);
+      addMesh(box(0.44, 0.05, 0.44), T, 0, 0.45, 0, ch); addMesh(box(0.4, 0.08, 0.03), T, 0, 0.82, -0.2, ch); addMesh(box(0.4, 0.08, 0.03), T, 0, 0.7, -0.2, ch);
+      [-0.18, 0.18].forEach(function (lx) { [-0.18, 0.18].forEach(function (lz) { addMesh(box(0.04, 0.43, 0.04), MAT.metalDark, lx, 0.215, lz, ch); }); });
+    });
+  });
+  nposter(PX(385) + 0.1, 1.7, PZ(330), Math.PI / 2, 0.9, 1.3, 0x7a3a5a); nposter(PX(767) - 0.1, 1.7, PZ(330), -Math.PI / 2, 0.9, 1.3, 0x6a7a3a); nposter(-1.0, 1.7, -3.7, Math.PI, 0.9, 0.6, 0x2a5a3a);
+  [[-2.3, -8.0], [1.5, -8.0], [-2.3, -5.2], [1.5, -5.2]].forEach(function (p) { nlamp(p[0], p[1]); });
+  // ---- COVE DO FOXY (cortina e plataforma ficam em nsetup) ----
+  nlamp(CVX, -4.9, MAT.bulbCorr);
+  // ---- BASTIDORES ----
+  nbx(D, 4.4, 0.85, 0.9, PX(166), 0, PZ(205));
+  [-1.4, -0.5, 0.5, 1.4].forEach(function (o, j) { addMesh(new THREE.SphereGeometry(0.17, 12, 10), j % 2 ? NM.white : MAT.metalOld, PX(166) + o, 1.02, PZ(205)); addMesh(cyl(0.06, 0.06, 0.5, 8), MAT.metalOld, PX(166) + o * 0.8, 0.92, PZ(205) + 0.2).rotation.z = 1.2; });
+  nbx(MAT.metalOld, 5.0, 2.0, 0.5, PX(150), 0, PZ(22) + 0.4);
+  [0.5, 1.0, 1.5].forEach(function (y, j) { for (k = 0; k < 5; k++) nbx((j + k) % 2 ? NM.cbox : NM.white, 0.5, 0.35, 0.4, PX(150) - 2.0 + k * 1.0, y, PZ(22) + 0.4); });
+  nbx(NM.cbox, 0.7, 0.5, 0.7, PX(290), 0, PZ(60)); nbx(NM.cbox, 0.6, 0.5, 0.6, PX(290) - 0.05, 0.5, PZ(60));
+  [[100, 120], [240, 120], [166, 215]].forEach(function (p) { nlamp(PX(p[0]), PZ(p[1]), MAT.bulbWarm); });
+  // ---- DEPÓSITO ----
+  nbx(MAT.metalOld, 0.5, 2.0, 2.4, PX(22) + 0.4, 0, PZ(330));
+  [0.5, 1.0, 1.5].forEach(function (y, j) { for (k = 0; k < 3; k++) nbx((j + k) % 2 ? NM.cbox : NM.white, 0.4, 0.35, 0.5, PX(22) + 0.4, y, PZ(330) - 0.8 + k * 0.8); });
+  nbx(NM.cbox, 0.7, 0.5, 0.7, PX(140), 0, PZ(380)); nbx(NM.cbox, 0.6, 0.5, 0.6, PX(140), 0.5, PZ(380)); addMesh(cyl(0.02, 0.02, 1.5, 6), MAT.metalDark, PX(60), 0.75, PZ(385)).rotation.z = 0.15;
+  nlamp(PX(96), PZ(330), MAT.bulbWarm);
+  // ---- BANHEIROS ----
+  [[792, 320], [925, 320]].forEach(function (p) { nbx(NM.white, 0.4, 0.4, 0.55, PX(p[0]), 0, PZ(p[1])); nbx(NM.white, 0.35, 0.8, 0.15, PX(p[0]), 0, PZ(p[1]) - 0.3); });
+  [800, 850, 915].forEach(function (x) { nbx(NM.white, 0.45, 0.15, 0.4, PX(x), 0.8, PZ(215) + 0.3); nbx(NM.tile, 0.1, 0.8, 0.1, PX(x), 0, PZ(215) + 0.3); addMesh(plane(0.6, 0.8), makeMat(0xaab4b8, 0.15, 0.6), PX(x), 1.5, PZ(215) + 0.09); });
+  [[860, 255], [815, 335], [925, 335], [882, 335], [860, 410]].forEach(function (p) { nlamp(PX(p[0]), PZ(p[1]), MAT.bulbCorr); });
+  nposter(PX(815), 1.7, PZ(455) - 0.1, Math.PI, 0.5, 0.5, 0x3a5a7a); nposter(PX(920), 1.7, PZ(455) - 0.1, Math.PI, 0.5, 0.5, 0x7a3a5a);
+  // ---- COZINHA ----
+  var kx = (PX(995) + PX(1022)) / 2, kz = (PZ(308) + PZ(375)) / 2;
+  nbx(NM.steel, PX(1022) - PX(995), 0.9, PZ(375) - PZ(308), kx, 0, kz);
+  for (i = 0; i < 4; i++) addMesh(cyl(0.09, 0.09, 0.03, 12), MAT.metalDark, kx + (i % 2 ? 0.12 : -0.12), 0.93, kz + (i < 2 ? -0.25 : 0.25));
+  nbx(NM.steel, PX(1135) - PX(1040), 0.9, PZ(450) - PZ(425), (PX(1135) + PX(1040)) / 2, 0, (PZ(450) + PZ(425)) / 2); nbx(MAT.metalDark, 0.7, 0.1, 0.4, PX(1085), 0.9, PZ(438));
+  nbx(D, 0.4, 0.8, 3.0, PX(983) + 0.25, 1.5, PZ(260)); nbx(D, 3.0, 0.8, 0.4, PX(1065), 1.5, PZ(215) + 0.3); nbx(NM.steel, 0.8, 1.9, 0.7, PX(1120), 0, PZ(215) + 0.45);
+  nbx(NM.steel, 1.6, 0.9, 0.8, PX(1075), 0, PZ(300));
+  for (i = 0; i < 5; i++) addMesh(cyl(0.1 + (i % 3) * 0.02, 0.1 + (i % 3) * 0.02, 0.18 + (i % 2) * 0.1, 10), i % 2 ? MAT.metalOld : NM.steel, PX(1075) - 0.6 + i * 0.3, 1.0, PZ(300));
+  [[1030, 300], [1090, 300], [1060, 400]].forEach(function (p) { nlamp(PX(p[0]), PZ(p[1]), MAT.bulbCorr); });
+  // ---- câmeras: corpo + lente (a imagem sai da posição real de cada uma) ----
+  MAP.cams.forEach(function (c) {
+    var a = c.yaw * Math.PI / 180;   // só o corpo, recuado para trás da câmera: nada fica na frente da lente
+    nbx(MAT.plasticBlack, 0.26, 0.18, 0.3, c.p[0] - Math.sin(a) * 0.4, c.p[1] - 0.18, c.p[2] + Math.cos(a) * 0.4);
+  });
+}
+
+function nskin(c) {   // revestimento: desgaste, manchas, rachaduras
+  var r = (c >> 16) & 255, gr = (c >> 8) & 255, b = c & 255;
+  return makeTexture(128, function (ctx, w, h) {
+    ctx.fillStyle = 'rgb(' + r + ',' + gr + ',' + b + ')'; ctx.fillRect(0, 0, w, h);
+    for (var i = 0; i < 34; i++) blotch(ctx, rnd(0, w), rnd(0, h), rnd(6, 26), i % 3 ? '20,14,8' : '210,196,170', rnd(0.08, 0.22));
+    ctx.strokeStyle = 'rgba(10,6,3,.5)';
+    for (i = 0; i < 6; i++) { var x = rnd(0, w), y = rnd(0, h); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + rnd(-14, 14), y + rnd(6, 22)); ctx.stroke(); }
+    scratches(ctx, w, h, 20, '0,0,0', 0.2, 24); addNoise(ctx, w, h, 300, 0.18, 1);
+  }, 1, 1);
+}
+// modelo físico: endoesqueleto nas juntas, placa parafusada, cabeça com órbitas fundas, olhos, focinho, mandíbula articulada e dentes
+function nanim(d) {
+  var g = new THREE.Group(), m = makeMat(0xffffff, 0.86, 0.05, { map: nskin(d[1]) }), mt = MAT.metalOld, k = d[2];
+  function sp(r) { return new THREE.SphereGeometry(r, 14, 10); }
+  function p(geo, mat, x, y, z, par) { return addMesh(geo, mat, x, y, z, par || g); }
+  var lg = [], ag = [];
+  [-1, 1].forEach(function (s) {
+    var L = new THREE.Group(); L.position.set(s * 0.16, 0.72, 0); g.add(L); lg.push(L);
+    p(cyl(0.11, 0.1, 0.4, 10), m, 0, -0.1, 0, L); p(sp(0.085), mt, 0, -0.3, 0, L); p(cyl(0.09, 0.08, 0.38, 10), m, 0, -0.5, 0, L); p(box(0.2, 0.09, 0.34), m, 0, -0.675, 0.05, L);
+    var A = new THREE.Group(); A.position.set(s * 0.4, 1.4, 0); g.add(A); ag.push(A);
+    p(sp(0.1), mt, 0, 0, 0, A); p(cyl(0.075, 0.07, 0.4, 10), m, s * 0.06, -0.22, 0, A).rotation.z = s * 0.14; p(sp(0.07), mt, s * 0.1, -0.43, 0, A); p(cyl(0.065, 0.06, 0.34, 10), m, s * 0.1, -0.62, 0.03, A); p(sp(0.075), m, s * 0.1, -0.82, 0.05, A);
+    [-0.03, 0, 0.03].forEach(function (f) { p(box(0.02, 0.09, 0.02), m, s * 0.1 + f, -0.89, 0.08, A); });
+  });
+  p(cyl(0.24, 0.2, 0.2, 12), mt, 0, 0.82, 0); p(cyl(0.27, 0.33, 0.8, 16), m, 0, 1.18, 0); p(cyl(0.1, 0.12, 0.14, 10), mt, 0, 1.62, 0); p(box(0.34, 0.3, 0.03), mt, 0, 1.25, 0.3);
+  [[-0.14, -0.1], [0.14, -0.1], [-0.14, 0.1], [0.14, 0.1]].forEach(function (b) { p(sp(0.014), MAT.metalBrass, b[0], 1.25 + b[1], 0.325); });
+  var h = new THREE.Group(); h.position.set(0, 1.84, 0); g.add(h);
+  var fox = k === 'x', jz = fox ? 0.28 : 0;
+  p(sp(0.29), m, 0, 0, 0, h).scale.set(1, 0.92, 1);
+  var mz = p(sp(0.17), m, 0, -0.08, fox ? 0.3 : 0.2, h); mz.scale.set(1.1, 0.7, fox ? 1.9 : 1.1);
+  var jw = new THREE.Group(); jw.position.set(0, -0.22, 0.1); jw.rotation.x = 0.14; h.add(jw);
+  p(box(0.22, 0.06, 0.24 + jz), m, 0, -0.02, 0.1 + jz / 2, jw);
+  for (var t = 0; t < 5; t++) { p(box(0.025, 0.04, 0.02), NM.white, -0.08 + t * 0.04, 0.02, 0.28 + jz, jw); p(box(0.025, 0.045, 0.02), NM.white, -0.08 + t * 0.04, -0.2, 0.36 + jz, h); }
+  [-1, 1].forEach(function (s) {
+    p(sp(0.07), NM.black, s * 0.12, 0.06, 0.2, h); p(sp(0.05), NM.eye, s * 0.12, 0.06, 0.226, h); p(sp(0.022), NM.black, s * 0.12, 0.06, 0.264, h);
+    p(box(0.14, 0.03, 0.04), m, s * 0.12, 0.15, 0.25, h).rotation.z = -s * 0.28;
+  });
+  p(sp(0.035), NM.black, 0, -0.04, 0.385 + (fox ? 0.23 : 0), h);
+  var red = makeMat(0x7a1414, 0.8, 0.05), or = makeMat(0xc9801a, 0.7, 0.05);
+  if (k === 'f' || k === 'b') { var tie = k === 'f' ? NM.black : red; [-1, 1].forEach(function (s) { p(box(0.12, 0.07, 0.03), tie, s * 0.07, 1.55, 0.27); }); p(sp(0.025), tie, 0, 1.55, 0.285); }
+  if (k === 'f') { [-1, 1].forEach(function (s) { p(sp(0.1), m, s * 0.24, 0.24, 0, h); p(sp(0.06), NM.black, s * 0.24, 0.24, 0.06, h); }); p(cyl(0.2, 0.2, 0.03, 16), NM.black, 0, 0.3, 0, h); p(cyl(0.13, 0.14, 0.26, 16), NM.black, 0, 0.44, 0, h); }
+  if (k === 'b') [-1, 1].forEach(function (s) { var e = p(cyl(0.045, 0.065, 0.6, 8), m, s * 0.13, 0.5, -0.02, h); e.rotation.z = -s * 0.1; e.rotation.x = -0.12; p(box(0.03, 0.42, 0.01), NM.black, s * 0.13, 0.48, 0.03, h).rotation.z = -s * 0.1; });
+  if (k === 'c') { p(box(0.26, 0.05, 0.2), or, 0, -0.13, 0.44, h); p(box(0.22, 0.04, 0.17), or, 0, 0, 0.2, jw); [-0.08, 0, 0.08].forEach(function (x) { p(new THREE.ConeGeometry(0.03, 0.14, 6), m, x, 0.33, 0, h); }); p(box(0.4, 0.3, 0.02), NM.white, 0, 1.3, 0.34); }
+  if (fox) {
+    [-1, 1].forEach(function (s) { p(new THREE.ConeGeometry(0.09, 0.24, 6), m, s * 0.2, 0.32, 0, h); });
+    p(cyl(0.07, 0.07, 0.02, 12), NM.black, 0.12, 0.06, 0.29, h).rotation.x = Math.PI / 2;
+    p(new THREE.TorusGeometry(0.07, 0.014, 6, 14, 4.4), MAT.metal, -0.1, -0.9, 0.08, ag[0]).rotation.y = Math.PI / 2;
+    p(box(0.2, 0.26, 0.02), NM.black, 0, 1.2, 0.31); [-0.06, 0, 0.06].forEach(function (o) { p(cyl(0.008, 0.008, 0.22, 6), MAT.metal, 0, 1.2 + o, 0.325).rotation.z = Math.PI / 2; });
+  }
+  g.traverse(function (o) { o.userData._dyn = true; });
+  scene.add(g); NS.dyn.push(g);
+  return nagent(d, g, h, jw, lg, ag);
+}
+
+/* ================================================================
+   INIMIGOS — IA por estados, navegação no grafo real, colisão e áudio
+   Tudo depende do relógio do jogo (Game.hour), nunca da hora real.
+   ================================================================ */
+var CFG = { R: 0.25, hourStart: 1, freddyFreeze: 9, foxyFreeze: 10, foxyDrain: 2, tpCool: 45 };
+var PF = {
+  Freddy: { side: 'right', spd: 0.6, tick: [8, 13], aggr: [.22, .32, .44, .56, .68], fear: .5, knocks: [1, 3], tp: .03, plan: ['salao', 'salaoS', 'corrM', 'jR', 'cR', 'dR'] },
+  Bonnie: { side: 'left', spd: 0.85, tick: [5, 9], aggr: [.25, .35, .45, .55, .65], fear: .1, knocks: [2, 5], tp: .07, plan: ['salao', 'salaoS', 'corrM', 'jL', 'cL', 'dL'] },
+  Chica: { side: 'right', spd: 0.75, tick: [5, 9], aggr: [.28, .38, .48, .58, .66], fear: .25, knocks: [1, 3], tp: .03, plan: null },
+  Foxy: { side: 'left', spd: 0.9, tick: [6, 10], aggr: [.2, .3, .4, .5, .6], fear: 0, knocks: [1, 1], tp: 0, plan: ['coveF', 'salaoS', 'corrM', 'jL', 'cL', 'dL'] }
+};
+function nrnd(r) { return r[0] + Math.random() * (r[1] - r[0]); }
+
+// ---------- ÁUDIO POSICIONAL (Web Audio, sintetizado) ----------
+var NA = {
+  c: null,
+  init: function () {
+    if (this.c) { try { this.c.resume(); } catch (e) {} return; }
+    try {
+      var C = window.AudioContext || window.webkitAudioContext; this.c = new C(); this.m = this.c.createGain(); this.m.gain.value = 0.9; this.m.connect(this.c.destination);
+      var b = this.c.createBuffer(1, this.c.sampleRate, this.c.sampleRate), d = b.getChannelData(0); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; this.nb = b;
+    } catch (e) { this.c = null; }
+  },
+  nz: function (d, t, dur, f, vol, type) {
+    var c = this.c, s = c.createBufferSource(), b = c.createBiquadFilter(), g = c.createGain();
+    s.buffer = this.nb; b.type = type || 'lowpass'; b.frequency.value = f; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    s.connect(b); b.connect(g); g.connect(d); s.start(t, Math.random() * 0.5, dur + 0.05);
+  },
+  to: function (d, t, dur, f0, f1, vol, type) {
+    var c = this.c, o = c.createOscillator(), g = c.createGain();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur); o.connect(g); g.connect(d); o.start(t); o.stop(t + dur + 0.05);
+  },
+  // jogador em (0, 1.5) olhando para -Z; parede/porta fechada entre a fonte e o jogador → som abafado
+  play: function (x, z, vol, fn) {
+    var c = this.c; if (!c || Math.hypot(x, z - 1.5) > 22) return; if (c.state === 'suspended') c.resume();
+    var bl = !nlos(0, 1.5, x, z), pn = c.createPanner(), f = c.createBiquadFilter(), g = c.createGain();
+    pn.panningModel = 'equalpower'; pn.distanceModel = 'inverse'; pn.refDistance = 2; pn.rolloffFactor = 1.4;
+    if (pn.positionX) { pn.positionX.value = x; pn.positionY.value = 0; pn.positionZ.value = z - 1.5; } else pn.setPosition(x, 0, z - 1.5);
+    f.type = 'lowpass'; f.frequency.value = bl ? 420 : 9000; g.gain.value = vol * (bl ? 0.6 : 1);
+    f.connect(g); g.connect(pn); pn.connect(this.m); fn(f, c.currentTime + 0.01);
+  },
+  step: function (x, z, hv) { var s = this; s.play(x, z, hv ? 1 : 0.6, function (d, t) { s.nz(d, t, 0.13, hv ? 240 : 170, 0.9); s.to(d, t, 0.12, hv ? 95 : 70, 40, 0.8); s.to(d, t + 0.02, 0.04, 2000 + Math.random() * 600, 900, 0.05, 'square'); }); },
+  knock: function (x, z, v) { var s = this; s.play(x, z, v, function (d, t) { for (var i = 0; i < 3; i++) { s.to(d, t + i * 0.17, 0.3, 190, 110, 0.9, 'triangle'); s.nz(d, t + i * 0.17, 0.1, 1100, 0.7); s.to(d, t + i * 0.17, 0.5, 430 + i * 25, 400, 0.12, 'triangle'); } }); },
+  clang: function (x, z) { var s = this, f = 500 + Math.random() * 400; s.play(x, z, 0.8, function (d, t) { s.to(d, t, 0.6, f, f * 0.98, 0.35, 'triangle'); s.to(d, t, 0.4, f * 2.76, f * 2.7, 0.15); s.nz(d, t, 0.08, 2500, 0.5); }); },
+  creak: function (x, z) { var s = this; s.play(x, z, 0.5, function (d, t) { s.to(d, t, 0.6, 70, 105, 0.12, 'sawtooth'); }); },
+  click: function (x, z) { var s = this; s.play(x, z, 0.35, function (d, t) { s.to(d, t, 0.04, 2300, 1400, 0.08, 'square'); }); },
+  zap: function () { var c = this.c; if (c) this.nz(this.m, c.currentTime + 0.01, 0.25, 2500, 0.25, 'highpass'); },
+  scream: function () { var s = this, c = s.c; if (!c) return; var t = c.currentTime + 0.01; s.nz(s.m, t, 1.3, 3500, 0.9, 'highpass'); s.to(s.m, t, 1.2, 380, 1500, 0.35, 'sawtooth'); s.to(s.m, t, 1.2, 95, 60, 0.4, 'square'); }
+};
+
+// ---------- COLISÃO (2D, caixas alinhadas; paredes geradas da MESMA lista MAP.walls usada pelo visual) ----------
+function ncols() {
+  var C = NS.col = [];
+  function add(x0, z0, x1, z1) { C.push([Math.min(x0, x1), Math.min(z0, z1), Math.max(x0, x1), Math.max(z0, z1)]); }
+  MAP.walls.forEach(function (w) {
+    var ax = w[0], c = w[1], h = NT / 2, cur = w[2];
+    function seg(p, q) { if (q - p < 0.01) return; if (ax === 'x') add(p, c - h, q, c + h); else add(c - h, p, c + h, q); }
+    (w[4] || []).slice().sort(function (p, q) { return p[0] - q[0]; }).forEach(function (d) { seg(cur, d[0] - d[1] / 2); cur = d[0] + d[1] / 2; });
+    seg(cur, w[3]);
+  });
+  // sala de segurança + corredores laterais (portas ficam nos vãos; plugs dinâmicos fecham os vãos)
+  add(-5.33, -3.6, -5.19, 3.0); add(5.19, -3.6, 5.33, 3.0); add(-5.33, 3.0, -2.39, 3.14); add(2.39, 3.0, 5.33, 3.14);
+  add(-2.39, -2.64, -2.25, -1.8); add(-2.39, -0.8, -2.25, 2.64); add(2.25, -2.64, 2.39, -1.8); add(2.25, -0.8, 2.39, 2.64); add(-2.39, -2.64, 2.39, -2.5);
+  add(-2.39, -3.6, -2.25, -2.64); add(2.25, -3.6, 2.39, -2.64);                       // paredes internas dos corredores (vazio entre eles)
+  TABLES.forEach(function (p) { add(p[0] - 0.55, p[1] - 0.55, p[0] + 0.55, p[1] + 0.55); add(p[0] - 0.25, p[1] - 0.95, p[0] + 0.25, p[1] + 0.95); });   // mesas + cadeiras
+  add(PX(995), PZ(308), PX(1022), PZ(375)); add(PX(1040), PZ(425), PX(1135), PZ(450)); add(PX(1075) - 0.8, PZ(300) - 0.4, PX(1075) + 0.8, PZ(300) + 0.4);   // cozinha
+  add(PX(120), PZ(22), PX(180), PZ(22) + 0.6); add(PX(60), PZ(190), PX(270), PZ(220));                                     // bastidores
+}
+function nplugs() {
+  var r = [];
+  if (Game.doors.left) r.push([-2.45, -1.8, -2.1, -0.8]);
+  if (Game.doors.right) r.push([2.1, -1.8, 2.45, -0.8]);
+  if (NS.cv.open < 0.55) r.push([CVX - 1.5, -6.05, CVX + 1.5, -5.65]);        // cortina da enseada fechada
+  return r;
+}
+function nres(x, z) {
+  var L = NS.col, ex = nplugs(), n = L.length, R = CFG.R, hit = false, i, b, cx, cz, dx, dz, d2, d, k, m, mi;
+  for (i = 0; i < n + ex.length; i++) {
+    b = i < n ? L[i] : ex[i - n]; cx = Math.max(b[0], Math.min(x, b[2])); cz = Math.max(b[1], Math.min(z, b[3])); dx = x - cx; dz = z - cz; d2 = dx * dx + dz * dz;
+    if (d2 >= R * R) continue; hit = true;
+    if (d2 > 1e-8) { d = Math.sqrt(d2); k = (R - d) / d; x += dx * k; z += dz * k; }
+    else { m = [x - b[0], b[2] - x, z - b[1], b[3] - z]; mi = m.indexOf(Math.min.apply(null, m)); if (mi === 0) x = b[0] - R; else if (mi === 1) x = b[2] + R; else if (mi === 2) z = b[1] - R; else z = b[3] + R; }
+  }
+  return [x, z, hit];
+}
+function nlos(x0, z0, x1, z1) {       // true = linha livre (sem parede/porta fechada)
+  var L = NS.col.concat(nplugs()), dx = x1 - x0, dz = z1 - z0, i, b, t0, t1, a, c, s;
+  for (i = 0; i < L.length; i++) {
+    b = L[i]; t0 = 0; t1 = 1;
+    if (Math.abs(dx) < 1e-9) { if (x0 < b[0] || x0 > b[2]) continue; } else { a = (b[0] - x0) / dx; c = (b[2] - x0) / dx; if (a > c) { s = a; a = c; c = s; } t0 = Math.max(t0, a); t1 = Math.min(t1, c); }
+    if (Math.abs(dz) < 1e-9) { if (z0 < b[1] || z0 > b[3]) continue; } else { a = (b[1] - z0) / dz; c = (b[3] - z0) / dz; if (a > c) { s = a; a = c; c = s; } t0 = Math.max(t0, a); t1 = Math.min(t1, c); }
+    if (t0 <= t1) return false;
+  }
+  return true;
+}
+// valida TODAS as ligações do grafo contra as colisões (portas abertas, cortina aberta). Devolve a lista de falhas.
+function nvalidate() {
+  var bad = [], d0 = { l: Game.doors.left, r: Game.doors.right }, o0 = NS.cv.open; Game.doors.left = Game.doors.right = false; NS.cv.open = 1;
+  MAP.edges.forEach(function (e) {
+    var A = MAP.nodes[e[0]], B = MAP.nodes[e[1]], n = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) / 0.05);
+    for (var i = 0; i <= n; i++) { var t = i / n, r = nres(A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t); if (r[2]) { bad.push(e[0] + '→' + e[1] + ' @' + (A[0] + (B[0] - A[0]) * t).toFixed(2) + ',' + (A[1] + (B[1] - A[1]) * t).toFixed(2)); break; } }
+  });
+  Game.doors.left = d0.l; Game.doors.right = d0.r; NS.cv.open = o0; return bad;
+}
+
+// ---------- NAVEGAÇÃO ----------
+function nopen(a, b) {
+  if ((a === 'dL' && b === 'inL') || (a === 'inL' && b === 'dL')) return !Game.doors.left;
+  if ((a === 'dR' && b === 'inR') || (a === 'inR' && b === 'dR')) return !Game.doors.right;
+  if ((a === 'cove' && b === 'coveF') || (a === 'coveF' && b === 'cove')) return NS.cv.open > 0.55;
+  return true;
+}
+function npath(from, to) {
+  var prev = {}, q = [from], c, p = [];
+  prev[from] = null;
+  while (q.length) { c = q.shift(); if (c === to) break; NS.adj[c].forEach(function (n) { if (!(n in prev) && nopen(c, n)) { prev[n] = c; q.push(n); } }); }
+  if (!(to in prev)) return null;
+  for (c = to; c !== null; c = prev[c]) p.unshift(c);
+  return p;
+}
+function nocc(k, me) { return NS.anims.some(function (o) { return o !== me && (o.node === k || o.to === k); }); }
+// o monitor está vendo este personagem? (câmera ativa + cone de visão + linha livre)
+function nobs(a) {
+  if (!(Game.monitorOpen && NS.on)) return false;
+  var c = MAP.cams[NS.act], th = c.base + c.off, dx = a.x - c.p[0], dz = a.z - c.p[2], d = Math.hypot(dx, dz);
+  if (d > 16 || d < 0.3 || (dx * Math.sin(th) - dz * Math.cos(th)) / d < 0.7) return false;
+  return nlos(c.p[0], c.p[2], a.x, a.z);
+}
+
+// ---------- AGENTE ----------
+function nagent(d, g, h, jw, lg, ag) {
+  var P = PF[d[0]], n = MAP.nodes[d[3]], plan = P.plan;
+  if (d[0] === 'Chica') plan = Math.random() < 0.5 ? ['jR', 'salaoW', 'kitE', 'kit', 'salaoW', 'jR', 'cR', 'dR'] : ['salao', 'salaoS', 'corrM', 'jR', 'cR', 'dR'];
+  var a = {
+    name: d[0], P: P, g: g, h: h, jw: jw, lg: lg, ag: ag, plan: plan, pi: 0, st: d[0] === 'Foxy' ? 'cove' : 'idle', mode: 'wait', gp: [], to: null, node: d[3], prev: null,
+    x: n[0], z: n[1], ry: 0, gy: d[3].indexOf('stage') === 0 ? 0.45 : 0, ph: Math.random() * 6, pk: 0, amp: 0, wait: 0, look: 0, kn: 0, armT: 0,
+    stuck: 0, obsT: 0, frz: 0, phase: 0, tpT: 0, vk: 1, runV: 1.2, alt: 0.12, rpi: 1, cl: [], armed: false,
+    first: ({ Freddy: 14, Bonnie: 5, Chica: 9, Foxy: 12 })[d[0]] + Math.random() * 10
+  };
+  g.rotation.order = 'YXZ'; g.position.set(a.x, a.gy, a.z); g.rotation.y = a.ry; return a;
+}
+// cortina da Pirate Cove: tecido roxo com estrelas de contorno branco (textura procedural) e pregas senoidais de verdade na malha
+function ncurtainTex() {
+  return makeTexture(512, function (ctx, w, h) {
+    var i, x, y, R, rot;
+    ctx.fillStyle = '#7a2a9c'; ctx.fillRect(0, 0, w, h);
+    for (i = 0; i < 14; i++) { ctx.fillStyle = i % 2 ? 'rgba(40,6,66,.55)' : 'rgba(190,130,230,.10)'; ctx.fillRect(i * w / 14, 0, w / 14, h); }      // luz/sombra de cada prega (14 meias-ondas = 7 pregas)
+    ctx.strokeStyle = 'rgba(16,4,26,.9)'; ctx.lineWidth = 3; for (i = 0; i <= 14; i++) { ctx.beginPath(); ctx.moveTo(i * w / 14, 0); ctx.lineTo(i * w / 14, h); ctx.stroke(); }
+    function star(x, y, R, rot) {
+      ctx.save(); ctx.translate(x, y); ctx.scale(1, 0.8); ctx.rotate(rot); ctx.beginPath();                                                    // 0,8 compensa o esticamento vertical do pano
+      for (var k = 0; k < 10; k++) { var a = k * Math.PI / 5 - Math.PI / 2, r = k % 2 ? R * 0.45 : R; ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); }
+      ctx.closePath(); ctx.stroke(); ctx.restore();
+    }
+    for (i = 0; i < 70; i++) {
+      x = Math.random() * w; y = Math.random() * h; R = i < 22 ? 20 + Math.random() * 16 : 6 + Math.random() * 6; rot = Math.random() * 6.28;
+      ctx.strokeStyle = 'rgba(30,8,44,.55)'; ctx.lineWidth = 5; star(x + 4, y + 4, R, rot);                                                      // sombra
+      ctx.strokeStyle = 'rgba(235,230,240,.95)'; ctx.lineWidth = i < 22 ? 3 : 2; star(x, y, R, rot);                                           // contorno branco
+    }
+    ctx.fillStyle = 'rgba(20,10,30,.25)'; for (i = 0; i < 16; i++) ctx.fillRect(Math.random() * w, Math.random() * h * 0.5, 2 + Math.random() * 6, 40 + Math.random() * 160);
+    addNoise(ctx, w, h, 900, 0.14, 1.5);
+  }, 1, 1);
+}
+// meia-elipse de pano em volta da plataforma. Coordenadas do GRUPO (girado 90°): z local = +x do mundo, x local = −z do mundo.
+// half −1 = lado oeste, +1 = lado leste; as duas metades param um pouco antes do meio e deixam uma fresta estreita.
+function narc(half, rx, rz, H, mat) {
+  var NX = 32, NY = 12, g = new THREE.PlaneGeometry(1, 1, NX, NY), q = g.attributes.position, i, u, v, t, ex, ez, nl, d, post = half < 0 ? -rx : rx;
+  for (i = 0; i < q.count; i++) {
+    u = (i % (NX + 1)) / NX; v = 1 - Math.floor(i / (NX + 1)) / NY;
+    t = half < 0 ? Math.PI - u * (Math.PI / 2 - 0.05) : u * (Math.PI / 2 - 0.05);
+    ex = rx * Math.cos(t); ez = rz * Math.sin(t); nl = Math.hypot(rz * Math.cos(t), rx * Math.sin(t));
+    d = Math.sin(u * Math.PI * 14) * (0.03 + 0.05 * (1 - v));                                        // pregas mais abertas embaixo
+    q.setXYZ(i, -(ez + rx * Math.sin(t) / nl * d), v * H + (v < 0.001 ? 0.08 * (0.5 + 0.5 * Math.sin(u * Math.PI * 14 + 1.2)) : 0), ex + rz * Math.cos(t) / nl * d - post);   // bainha ondulada
+  }
+  g.computeVertexNormals(); return new THREE.Mesh(g, mat);
+}
+
+function nsetup() {
+  Object.keys(MAP.nodes).forEach(function (k) { NS.adj[k] = []; });
+  MAP.edges.forEach(function (e) { NS.adj[e[0]].push(e[1]); NS.adj[e[1]].push(e[0]); });
+  // Pirate Cove: cortina curva (meia-elipse) roxa de estrelas em volta de uma plataforma oval, com fresta no meio; placa "Out of Order" num pedestal na frente
+  var cmat = makeMat(0xffffff, 0.95, 0, { map: ncurtainTex(), side: THREE.DoubleSide }), cn = new THREE.Group(), cs = new THREE.Group(), i, RX = 1.5, RZ = 0.95, CZ = -6.5, CH = 2.6;
+  cn.position.set(CVX - RX, 0, CZ); cs.position.set(CVX + RX, 0, CZ); cn.rotation.y = cs.rotation.y = Math.PI / 2; scene.add(cn); scene.add(cs);
+  cn.add(narc(-1, RX, RZ, CH, cmat)); cs.add(narc(1, RX, RZ, CH, cmat));
+  var ring = addMesh(new THREE.TorusGeometry(RX, 0.025, 6, 40, Math.PI), MAT.metalDark, CVX, CH + 0.03, CZ); ring.rotation.x = Math.PI / 2; ring.scale.y = RZ / RX;   // trilho curvo no alto
+  var pf = addMesh(new THREE.CylinderGeometry(RX + 0.12, RX + 0.12, 0.08, 36, 1, false, -Math.PI / 2, Math.PI), NM.stage, CVX, 0.04, CZ); pf.scale.z = (RZ + 0.1) / (RX + 0.12);
+  nbx(NM.stage, 2 * (RX + 0.12), 0.08, CZ + 7.19, CVX, 0, (CZ - 7.19) / 2);
+  var sg = makeMat(0xffffff, 0.9, 0, { map: makeTexture(256, function (ctx, w, h) {
+    ctx.fillStyle = '#cfcfc8'; ctx.fillRect(0, 0, w, h); ctx.scale(1, 1.56); ctx.fillStyle = '#2a2a2a'; ctx.textAlign = 'center';
+    ctx.font = 'bold 50px Georgia'; ctx.fillText('~Sorry!~', w / 2, 70); ctx.font = '38px Georgia'; ctx.fillText('Out Of Order', w / 2, 120); addNoise(ctx, w, h, 500, 0.25, 1.5);
+  }, 1, 1) });
+  addMesh(cyl(0.02, 0.02, 0.9, 8), MAT.metalOld, CVX - 0.5, 0.45, -5.3); addMesh(cyl(0.12, 0.12, 0.02, 12), MAT.metalDark, CVX - 0.5, 0.01, -5.3);
+  nbx(MAT.metalOld, 0.56, 0.38, 0.03, CVX - 0.5, 0.78, -5.3); addMesh(plane(0.5, 0.32), sg, CVX - 0.5, 0.97, -5.28);
+  var wh = new THREE.Group(); wh.position.set(PX(208) + 0.2, 1.5, -5.6); wh.rotation.y = Math.PI / 2; scene.add(wh);                      // leme na parede oeste
+  addMesh(new THREE.TorusGeometry(0.28, 0.03, 8, 24), NM.woodT, 0, 0, 0, wh); addMesh(cyl(0.06, 0.06, 0.08, 10), MAT.metalBrass, 0, 0, 0, wh).rotation.x = Math.PI / 2;
+  for (i = 0; i < 4; i++) addMesh(box(0.62, 0.035, 0.035), NM.dwood, 0, 0, 0, wh).rotation.z = i * Math.PI / 4;
+  nbx(MAT.plasticBlack, 0.3, 0.7, 0.4, PX(208) + 0.35, 0, -4.4); addMesh(cyl(0.12, 0.12, 0.02, 16), MAT.rubber, PX(208) + 0.51, 0.42, -4.4).rotation.z = Math.PI / 2;   // caixa de som
+  nbx(NM.cbox, 0.5, 0.4, 0.5, CVX + 1.75, 0, -6.85); nbx(NM.cbox, 0.4, 0.04, 0.3, CVX + 1.75, 0.4, -6.95);
+  [cn, cs].forEach(function (q) { q.traverse(function (o) { o.userData._dyn = true; }); NS.dyn.push(q); });
+  NS.cv = { n: cn, s: cs, open: 0, tgt: 0 };
+  ncols();
+  var bad = nvalidate(); if (bad.length && window.console) console.warn('Nightshift: ligações do grafo que colidem:', bad);
+}
+
+// ---------- DECISÃO ----------
+function ndecide(a, sc) {
+  var P = a.P, wp = a.plan[a.pi], nxt, pth, nb;
+  if (P.tp && a.tpT <= 0 && Math.random() < P.tp && ntele(a)) { a.wait = nrnd(P.tick) * sc; return; }
+  if (Math.random() >= P.aggr[NS.lvl]) { a.look = 1.5 + Math.random() * 2; a.wait = nrnd(P.tick) * 0.5 * sc; return; }   // observa em vez de avançar
+  nb = NS.adj[a.node].filter(function (n) { return n !== a.prev && n !== 'cove' && n !== 'inL' && n !== 'inR' && nopen(a.node, n); });
+  pth = npath(a.node, wp);
+  if (nb.length && Math.random() < a.alt) nxt = nb[Math.floor(Math.random() * nb.length)];     // rota alternativa
+  else if (pth && pth.length > 1) nxt = pth[1];
+  else { a.wait = 2; return; }
+  if (nocc(nxt, a)) { a.wait = 1.5 + Math.random() * 2; return; }
+  a.prev = a.node; a.gp = [nxt]; a.mode = 'walk'; a.st = 'walk'; a.obsT = 0; a.vk = 0.8 + Math.random() * 0.4;
+}
+function ntele(a) {      // raro: só fora do campo da câmera, nunca perto da porta, sempre para um nó válido do trajeto
+  var j = a.pi + 1; if (a.pi < 1 || j >= a.plan.length - 2) return false;
+  var k = a.plan[j], t = MAP.nodes[k];
+  if (Math.hypot(t[0] - a.x, t[1] - a.z) > 6 || nocc(k, a) || nobs(a) || nobs({ x: t[0], z: t[1] })) return false;
+  a.x = t[0]; a.z = t[1]; a.node = k; a.prev = null; a.pi = j + 1; a.tpT = CFG.tpCool; NS.bs = Math.max(NS.bs || 0, 1); NA.zap(); return true;
+}
+function nretreat(a, sc) {
+  var tgt = a.name === 'Foxy' ? 'cove' : a.plan[Math.max(0, a.plan.length - 3)], p = npath(a.node, tgt);
+  if (!p || p.length < 2) { a.wait = 3; return; }
+  a.gp = p.slice(1); a.mode = 'retreat'; a.st = 'walk'; a.rpi = Math.max(1, a.plan.indexOf(tgt) + 1); a.kn = 0;
+}
+function ndoor(a, sc) {
+  var P = a.P, side = P.side === 'left' ? 'left' : 'right', closed = Game.doors[side], inn = side === 'left' ? 'inL' : 'inR', fox = a.name === 'Foxy';
+  if (!closed && !nocc(inn, a) && (fox || Math.random() < P.aggr[NS.lvl] + 0.2)) {
+    if (Game.lights[side] && !fox && Math.random() < P.fear) { nretreat(a, sc); return; }     // a luz o afasta
+    a.gp = [inn]; a.mode = 'entry'; a.st = 'walk'; a.vk = 1; return;
+  }
+  if (closed) {
+    a.kn++; a.armT = 0.6; NA.knock(a.x, a.z, fox ? 1 : 0.75);
+    if (fox) { Game.power = Math.max(0, Game.power - CFG.foxyDrain); NS.shake = 0.5; }
+    if (a.kn >= Math.round(nrnd(P.knocks))) { nretreat(a, sc); return; }
+    a.wait = 1.8 + Math.random() * 3; return;
+  }
+  a.look = 2; a.wait = 2 + Math.random() * 3;                                                 // porta aberta: ameaça e espera
+  if (++a.kn > 4 && Math.random() < 0.4) nretreat(a, sc);
+}
+function ncove(a, dt, sc) {
+  var cv = NS.cv, watch = Game.monitorOpen && NS.on, p, pth, o;
+  if (watch && MAP.cams[NS.act].cove && a.frz < CFG.foxyFreeze) { a.frz += dt; return; }      // olhar a enseada o segura, por tempo limitado
+  a.wait -= dt; if (a.wait > 0) return;
+  a.frz = 0; a.wait = nrnd(a.P.tick) * sc;
+  if (a.phase === 3) {                                                                   // cortina totalmente aberta: ele parte
+    pth = npath('cove', 'dL'); o = NS.anims.filter(function (q) { return q !== a && (q.node === 'dL' || q.to === 'dL'); })[0];
+    var clear = pth && pth.slice(1).every(function (k) { var T = MAP.nodes[k]; return !NS.anims.some(function (q) { return q !== a && (q.node === k || q.to === k || (k !== 'dL' && Math.hypot(q.x - T[0], q.z - T[1]) < 0.9)); }); });
+    if (!pth || (o && o.st !== 'door') || (!o && !clear) || (o && !pth.slice(1, -1).every(function (k) { return !nocc(k, a); }))) { a.wait = 1.5; return; }
+    if (o) nretreat(o, 1);
+    a.gp = pth.slice(1); a.mode = 'run'; a.st = 'walk'; a.runV = 1.2; a.phase = 4; return;
+  }
+  p = a.P.aggr[NS.lvl] * (watch ? 0.5 : 1) * (NS.idle > 25 ? 1.4 : 1);
+  if (Math.random() > p) return;
+  a.phase++; cv.tgt = [0, 0.3, 0.6, 1][a.phase]; NA.creak(a.x - 0.4, a.z); if (a.phase === 3) a.wait = 1.4 + Math.random();
+}
+
+// ---------- MOVIMENTO ----------
+function narrive(a) {
+  var P = a.P, sc = 1 - 0.1 * NS.lvl, m = a.mode;
+  a.mode = 'wait';
+  if (m === 'entry') { nkill(a); return; }
+  if (m === 'run') { a.st = 'door'; a.kn = 0; a.wait = 0.45; return; }
+  if (m === 'retreat') {
+    if (a.name === 'Foxy') { a.st = 'cove'; a.phase = 0; NS.cv.tgt = 0; a.ry = 0; a.wait = nrnd(P.tick) * 1.5; return; }
+    a.st = 'wait'; a.pi = a.rpi; a.wait = nrnd(P.tick) * 1.3 * sc; return;
+  }
+  if (a.node === a.plan[a.pi]) a.pi++;
+  if (a.pi >= a.plan.length) { a.st = 'door'; a.kn = 0; a.wait = 2.5 + Math.random() * 2.5; return; }   // tempo razoável para o jogador perceber
+  a.st = 'wait'; a.wait = nrnd(P.tick) * sc;
+  if (a.name === 'Chica' && a.node === 'kit') { a.wait += 3 + Math.random() * 4; a.cl = [1, 2.4, 3.8]; }
+}
+function nmove(a, dt) {
+  var t, dx, dz, d, v, ta, df, k, ox, oz, r, st, o, i, ds;
+  if (!a.to) {
+    if (!a.gp.length) { narrive(a); return; }
+    a.to = a.gp.shift();
+    if (!nopen(a.node, a.to)) {         // porta fechou / cortina fechada no caminho: não atravessa
+      a.to = null; a.gp = [];
+      if (a.mode === 'entry' || a.mode === 'run') { a.mode = 'wait'; a.st = 'door'; a.wait = 0.3; } else { a.mode = 'wait'; a.st = 'wait'; a.wait = 2; }
+      return;
+    }
+  }
+  t = MAP.nodes[a.to]; dx = t[0] - a.x; dz = t[1] - a.z; d = Math.hypot(dx, dz);
+  if (a.mode === 'run') { a.runV = Math.min(6.2, a.runV + dt * 3.4); v = a.runV; }
+  else v = a.P.spd * (a.mode === 'entry' ? 1.5 : a.mode === 'retreat' ? 1.1 : 1) * a.vk;
+  ta = Math.atan2(dx, dz); df = Math.atan2(Math.sin(ta - a.ry), Math.cos(ta - a.ry)); a.ry += df * Math.min(1, dt * (a.mode === 'run' ? 9 : 3.5));
+  st = v * dt * (Math.abs(df) > 0.9 ? 0.2 : 1);                       // gira antes de andar
+  ox = a.x; oz = a.z;
+  if (d <= st) { a.x = t[0]; a.z = t[1]; a.node = a.to; a.to = null; ds = d; }
+  else { a.x += dx / d * st; a.z += dz / d * st; ds = st; }
+  for (i = 0; i < NS.anims.length; i++) { o = NS.anims[i]; if (o === a) continue; dx = a.x - o.x; dz = a.z - o.z; d = Math.hypot(dx, dz); if (d < 0.55 && d > 1e-3) { a.x += dx / d * (0.55 - d) * 0.5; a.z += dz / d * (0.55 - d) * 0.5; } }
+  r = nres(a.x, a.z); a.x = r[0]; a.z = r[1];
+  a.stuck = (Math.hypot(a.x - ox, a.z - oz) < ds * 0.2 && ds > 0.001) ? a.stuck + dt : 0;
+  if (a.stuck > 2.5) { a.stuck = 0; a.to = null; a.gp = []; a.mode = 'wait'; a.st = 'wait'; a.wait = 2; if (a.name === 'Foxy' && a.phase === 4) nretreat(a, 1); return; }  // sem atalhos: replaneja
+  a.ph += ds * Math.PI / (a.mode === 'run' ? 1.1 : 0.7);
+  k = Math.floor(a.ph / Math.PI); if (k !== a.pk) { a.pk = k; NA.step(a.x, a.z, a.mode !== 'run'); }
+  if (!a.to && !a.gp.length) narrive(a);
+}
+
+// ---------- POSE / ANIMAÇÃO ----------
+function npose(a, dt) {
+  var t = NS.t, mv = a.st === 'walk', run = mv && a.mode === 'run', s, c, tg;
+  a.amp += ((mv ? (run ? 0.9 : 0.45) : 0) - a.amp) * Math.min(1, dt * 6);       // transição suave ao parar
+  s = Math.sin(a.ph); c = a.amp;
+  a.lg[0].rotation.x = s * c; a.lg[1].rotation.x = -s * c; a.ag[0].rotation.x = -s * c * 0.8; a.ag[1].rotation.x = s * c * 0.8;
+  if (a.armT > 0) { a.armT -= dt; a.ag[1].rotation.x = -1.4 + Math.sin(a.armT * 28) * 0.35; }
+  tg = (a.z < -15.2 && Math.abs(a.x) < 2.05) ? 0.45 : 0; a.gy += (tg - a.gy) * Math.min(1, dt * 8);
+  a.g.position.set(a.x, a.gy + Math.abs(s) * 0.04 * c / 0.45 + Math.sin(t * 1.3 + a.ph) * 0.006, a.z);
+  a.g.rotation.y = a.ry + (mv ? 0 : Math.sin(t * 0.4 + a.ph) * 0.03);
+  a.g.rotation.x = run ? 0.22 : (a.name === 'Foxy' && a.phase === 2 ? 0.12 : 0);
+  a.look -= dt;
+  a.h.rotation.y = a.look > 0 ? Math.sin(t * 0.9 + a.ph) * 0.5 : Math.sin(t * 0.5 + a.ph) * 0.12;
+  a.h.rotation.z = a.st === 'door' ? 0.22 * Math.sin(t * 0.7) : 0;
+  a.jw.rotation.x = 0.14 + (run ? 0.55 : Math.max(0, Math.sin(t * 0.9 + a.ph * 3) - 0.85) * 3);
+}
+function nai(dt) {
+  NS.idle += dt;
+  var go = Game.hour >= CFG.hourStart && !Game.over, cv = NS.cv;                 // relógio do jogo
+  NS.lvl = Math.max(0, Math.min(4, Game.hour - CFG.hourStart));
+  cv.open += (cv.tgt - cv.open) * Math.min(1, dt * 1.6); cv.n.scale.z = cv.s.scale.z = 1 - 0.82 * cv.open;
+  if (NS.shake > 0) { NS.shake -= dt; camera.position.x = (Math.random() - 0.5) * 0.08; } else if (camera.position.x !== 0) camera.position.x = 0;
+  NS.anims.forEach(function (a) {
+    if (Game.over) return;
+    if (go) {
+      if (!a.armed) { a.armed = true; a.wait = a.first; if (a.st === 'idle') a.st = 'wait'; }
+      var sc = (1 - 0.1 * NS.lvl) * (a.name === 'Bonnie' && NS.idle > 25 ? 0.8 : 1);
+      a.tpT -= dt;
+      if (a.cl.length) { a.cl[0] -= dt; if (a.cl[0] <= 0) { a.cl.shift(); NA.clang(a.x - 0.5, a.z); } }
+      if (a.st === 'wait') { if (a.name === 'Freddy' && a.obsT < CFG.freddyFreeze && nobs(a)) a.obsT += dt; else { a.wait -= dt; if (a.wait <= 0) ndecide(a, sc); } }
+      else if (a.st === 'walk') nmove(a, dt);
+      else if (a.st === 'door') { a.wait -= dt; if (a.wait <= 0) ndoor(a, sc); }
+      else if (a.st === 'cove') ncove(a, dt, sc);
+    } else if (Math.random() < dt * 0.15) NA.click(a.x, a.z);                      // antes da 1h: só estalos e microajustes no lugar
+    npose(a, dt);
+  });
+}
+
+// ---------- DERROTA / VITÓRIA ----------
+function nover(title, sub, btn) {
+  var o = document.createElement('div');
+  o.style.cssText = 'position:absolute;inset:0;z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.86);color:#d3c6b6;letter-spacing:.2em;text-align:center';
+  o.innerHTML = '<div style="font-size:2rem;color:#a32a24">' + title + '</div><div style="margin:14px 0 26px;font-size:.9rem;color:#9a8c7d">' + sub + '</div><button style="background:none;border:1px solid #9a8c7d;color:#d3c6b6;padding:12px 26px;font:1rem Courier New,monospace;letter-spacing:.2em;cursor:pointer">' + btn + '</button>';
+  o.querySelector('button').onclick = function () { location.reload(); };
+  document.getElementById('game').appendChild(o);
+}
+function nkill(a) {
+  if (Game.over) return;
+  Game.over = true; NS.killer = a; NS.jt = 0;
+  if (Game.monitorOpen) { Game.monitorOpen = false; NS.show(false); }
+  NA.scream();
+}
+NS.jumpUpdate = function (dt) {
+  var a = NS.killer; NS.jt = (NS.jt || 0) + dt; if (!a) return;
+  var d = new THREE.Vector3(), k = Math.min(1, NS.jt * 6), sh = NS.jt < 1.4 ? (Math.random() - 0.5) * 0.08 : 0;
+  camera.getWorldDirection(d);
+  a.g.position.set(camera.position.x + d.x * (1.9 - 0.9 * k) + sh, camera.position.y - 1.72 + sh, camera.position.z + d.z * (1.9 - 0.9 * k));
+  a.g.rotation.set(0, Math.atan2(-d.x, -d.z), 0); a.jw.rotation.x = 0.85; a.lg[0].rotation.x = a.lg[1].rotation.x = 0; a.ag[0].rotation.x = a.ag[1].rotation.x = -1.2;
+  if (NS.jt > 1.8 && !NS.ov) { NS.ov = 1; nover('VOCÊ FOI PEGO', a.name.toUpperCase() + ' ENTROU NA SALA', 'TENTAR NOVAMENTE'); }
+};
+NS.win = function () { NA.zap(); nover('6:00 AM', 'VOCÊ SOBREVIVEU À NOITE', 'JOGAR NOVAMENTE'); };
+
+// ---------- INTERFACE DO MONITOR ----------
+function nui() {
+  var css = document.createElement('style');
+  css.textContent = '#cam-ui{position:absolute;inset:0;z-index:6}#cam-ui.off{display:none}' +
+    '#cam-view{position:absolute;inset:0;touch-action:none;pointer-events:auto}' +
+    '#cam-fx{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px);box-shadow:inset 0 0 140px rgba(0,0,0,.7)}' +
+    '#cam-fx::after{content:"";position:absolute;inset:-20%;opacity:var(--nzo,.07);background-image:var(--nz);animation:cam-nz .5s steps(4) infinite}' +
+    '@keyframes cam-nz{0%{transform:translate(0,0)}25%{transform:translate(-3%,2%)}50%{transform:translate(2%,-3%)}75%{transform:translate(-2%,-2%)}100%{transform:translate(3%,3%)}}' +
+    '#cam-ui.gl #cam-fx{background:repeating-linear-gradient(0deg,rgba(255,255,255,.05) 0 2px,rgba(0,0,0,.2) 2px 5px)}#cam-ui.gl #cam-fx::after{opacity:.16}' +
+    '#cam-ui.gl #cam-view{transform:translateX(3px)}' +
+    '#cam-label{position:absolute;left:24px;bottom:190px;pointer-events:none;color:#d3c6b6;font:1.05rem "Cutive Mono","Courier New",monospace;letter-spacing:.18em;text-shadow:0 0 3px #000,0 1px 7px #000}' +
+    '#cam-label small{display:block;font-size:.66rem;color:#9a8c7d;letter-spacing:.24em;margin-top:3px}#cam-label i{color:#a32a24;font-style:normal}' +
+    '#cam-map{position:absolute;right:24px;top:96px;width:min(40vw,380px);aspect-ratio:264/174;background:rgba(0,0,0,.55);border:1px solid rgba(211,198,182,.22);pointer-events:auto;touch-action:manipulation}' +
+    '#cam-map svg{width:100%;height:100%;display:block}#cam-map .mk{cursor:pointer}#cam-map .mk circle{fill:#1a1210;stroke:#9a8c7d;stroke-width:.7}#cam-map .mk text{fill:#d3c6b6;font:4px "Courier New",monospace;text-anchor:middle;pointer-events:none}' +
+    '#cam-map .mk.sel circle{fill:#590503;stroke:#d3c6b6}#cam-map .rm{fill:rgba(211,198,182,.05);stroke:rgba(211,198,182,.35);stroke-width:.4}#cam-map .rl{fill:#7f7265;font:2.4px "Courier New",monospace;text-anchor:middle;pointer-events:none}' +
+    'canvas.cctv{filter:grayscale(.6) contrast(1.2) brightness(1.1) sepia(.18)}';
+  document.head.appendChild(css);
+  var nc = document.createElement('canvas'); nc.width = nc.height = 64; var x = nc.getContext('2d'), im = x.createImageData(64, 64);
+  for (var i = 0; i < im.data.length; i += 4) { var v = Math.random() * 255; im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255; }
+  x.putImageData(im, 0, 0);
+  var ui = document.createElement('div'); ui.id = 'cam-ui'; ui.className = 'off'; ui.style.setProperty('--nz', 'url(' + nc.toDataURL() + ')');
+  var sx = function (v) { return (v + 13.2) * 10; }, sz = function (v) { return (v + 14.2) * 10; }, svg = '<svg viewBox="0 0 264 174">';
+  Object.keys(MAP.rooms).forEach(function (k) { var r = MAP.rooms[k]; svg += '<rect class="rm" x="' + sx(r[0]) + '" y="' + sz(r[1]) + '" width="' + (r[2] - r[0]) * 10 + '" height="' + (r[3] - r[1]) * 10 + '"/>'; });
+  MAP.cams.forEach(function (c, i) { svg += '<g class="mk" data-i="' + i + '"><circle cx="' + sx(c.p[0]) + '" cy="' + sz(c.p[2]) + '" r="4.2"/><text x="' + sx(c.p[0]) + '" y="' + (sz(c.p[2]) + 1.5) + '">' + c.id + '</text></g>'; });
+  ui.innerHTML = '<div id="cam-view"></div><div id="cam-fx"></div><div id="cam-label"></div><div id="cam-map">' + svg + '</svg></div>';
+  document.getElementById('game').appendChild(ui);
+  NS.ui = ui; NS.view = ui.querySelector('#cam-view'); NS.label = ui.querySelector('#cam-label');
+  ui.querySelectorAll('.mk').forEach(function (g) {
+    g.addEventListener('pointerdown', function (e) { e.stopPropagation(); if (e.pointerType === 'mouse' && e.button !== 0) return; NS.select(+g.getAttribute('data-i')); });
+  });
+  // entrada: botão direito (zonas 30/40/30) e arrastar com o dedo
+  var P = NS.P = { rmb: false, x: 0.5, drag: false, lx: 0, man: 0, mv: 0, w: 1 };
+  function pos(e) { var r = NS.view.getBoundingClientRect(); P.x = (e.clientX - r.left) / r.width; }
+  NS.view.addEventListener('pointerdown', function (e) {
+    if (e.pointerType === 'mouse') { if (e.button !== 2) return; P.rmb = true; } else { P.drag = true; P.lx = e.clientX; }
+    pos(e); try { NS.view.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  NS.view.addEventListener('pointermove', function (e) {
+    pos(e);
+    if (P.drag && e.pointerType !== 'mouse') {
+      var c = MAP.cams[NS.act], lim = c.lim * Math.PI / 180; c.off = Math.max(-lim, Math.min(lim, c.off + (e.clientX - P.lx) * 0.0035)); P.lx = e.clientX; P.man = 1.2;
+    }
+  });
+  function stop() { P.rmb = false; P.drag = false; }
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (n) { NS.view.addEventListener(n, stop); });
+  window.addEventListener('blur', stop); document.addEventListener('visibilitychange', stop);
+  document.addEventListener('keydown', function (e) { if (NS.on && /^Digit[1-9]$/.test(e.code)) NS.select(+e.code.slice(5) - 1); });
+}
+
+NS.select = function (i) {
+  NS.act = i; var c = MAP.cams[i];
+  NS.label.innerHTML = '<i>●</i> CAM ' + c.id + '<small>' + c.n + ' · SINAL <span id="cam-sig">OK</span></small>';
+  NS.ui.querySelectorAll('.mk').forEach(function (g, k) { g.classList.toggle('sel', k === i); });
+  NS.key.color.setHex(c.lc); NS.key.position.set(c.lp[0], c.lp[1], c.lp[2]); NS.key.intensity = NS.on ? c.li : 0;
+  NS.fill.position.set(c.p[0], c.p[1] - 0.4, c.p[2]); NS.fill.intensity = NS.on ? 0.4 : 0;
+  var lt = c.lt || [c.lp[0], 0, c.lp[2]]; NS.key.target.position.set(lt[0], lt[1], lt[2]); NS.key.target.updateMatrixWorld(); NS.bs = 0.4;
+  NS.key.updateMatrixWorld(); NS.fill.updateMatrixWorld();
+};
+NS.show = function (on) {
+  NS.on = on; NS.ui.classList.toggle('off', !on); renderer.domElement.classList.toggle('cctv', on);
+  scene.fog.density = on ? 0.02 : 0.04; NS.amb.intensity = on ? 0.5 : 0; NS.key.shadow.autoUpdate = on; NS.key.shadow.needsUpdate = true; NS.P.rmb = NS.P.drag = false;
+  NS.select(NS.act);
+};
+NS.update = function (dt) {
+  NS.t = (NS.t || 0) + dt; nai(dt);
+  if (!NS.on) return;
+  var P = NS.P, c = MAP.cams[NS.act], lim = c.lim * Math.PI / 180;
+  var zone = P.rmb ? (P.x < 0.3 ? -1 : (P.x > 0.7 ? 1 : 0)) : 0;
+  P.man = Math.max(0, P.man - dt);
+  var active = P.rmb || P.drag || P.man > 0;
+  P.w += ((active ? 0 : 1) - P.w) * Math.min(1, dt * (active ? 10 : 1.2));            // automático some/volta sem salto
+  var room = Math.max(0, Math.min(1, (lim - c.off * zone) / (0.15 * lim)));            // freia suave no limite (manual)
+  P.mv += (zone * 0.4 * (zone ? room : 1) - P.mv) * Math.min(1, dt * 6);
+  var dist = lim - c.off * c.dir; if (dist < 0.02) c.dir = -c.dir;
+  var edge = Math.max(0.12, Math.min(1, dist / (0.3 * lim)));
+  c.av += (c.dir * 0.16 * edge - c.av) * Math.min(1, dt * 1.5);                       // varredura lenta, desacelera nas pontas
+  c.off = Math.max(-lim, Math.min(lim, c.off + (c.av * P.w + P.mv) * dt));
+  NS.cam.position.set(c.p[0], c.p[1], c.p[2]); NS.cam.rotation.set(-0.16, -(c.base + c.off), 0);
+  var asp = window.innerWidth / window.innerHeight; var fv = c.fov || 68; if (Math.abs(NS.cam.aspect - asp) > 0.001 || NS.cam.fov !== fv) { NS.cam.aspect = asp; NS.cam.fov = fv; NS.cam.updateProjectionMatrix(); }
+  NS.fk = (NS.fk === undefined ? 8 : NS.fk) - dt; NS.fl = NS.fl || 0;                  // uma lâmpada pisca de leve, raramente
+  if (NS.fk <= 0) { NS.fl = 0.12 + Math.random() * 0.15; NS.fk = 9 + Math.random() * 14; }
+  var fk = 1; if (NS.fl > 0) { NS.fl -= dt; fk = Math.random() < 0.5 ? 0.45 : 0.8; }
+  NS.key.intensity = c.li * fk; NS.bs = Math.max(0, (NS.bs || 0) - dt);
+  NS.ui.style.setProperty('--nzo', (0.04 + 0.04 * (0.5 + 0.5 * Math.sin(NS.t * 0.37)) + NS.bs * 0.6).toFixed(3));   // estática oscila e dá um pico ao trocar de câmera
+  NS.gl -= dt;                                                                          // interferência ocasional
+  if (NS.gl <= 0) { var g = NS.ui.classList.toggle('gl'); var s = document.getElementById('cam-sig'); if (s) s.textContent = g ? 'INTERFERÊNCIA' : 'OK'; NS.gl = g ? 0.18 : 14 + Math.random() * 20; }
+};
 
 if (document.readyState === 'loading') {
   window.addEventListener('DOMContentLoaded', init);
