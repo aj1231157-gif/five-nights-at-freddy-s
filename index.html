@@ -6,7 +6,7 @@
 <title>FREDDY'S NIGHTSHIFT</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; user-select:none; font-family:'Courier New',monospace; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#000; overscroll-behavior:none; -webkit-touch-callout:none; }
   #game { position:fixed; inset:0; width:100%; height:100%; -webkit-tap-highlight-color:transparent; touch-action:none; }
   canvas { display:block; }
   #vignette {
@@ -193,6 +193,9 @@
   .mode-mobile #btn-monitor:active:not(:disabled) { transform:translateX(-50%) scale(.97); }
   .mode-mobile .menu-btn, .mode-mobile .mode-btn { touch-action:manipulation; }
 
+  /* camada própria para a vinheta (não é repintada a cada quadro do WebGL) */
+  .mode-mobile #vignette { transform:translateZ(0); }
+
   /* telas baixas (celulares em paisagem) – menu compacto */
   @media (max-height:480px) {
     #menu h1 { font-size:clamp(1.4rem,8vh,2.4rem); letter-spacing:6px; text-align:center; }
@@ -321,6 +324,57 @@ var Game = {
    THREE
    ================================================================ */
 var renderer, scene, camera, objs = {};
+
+/* ================================================================
+   DESEMPENHO (CELULAR) — nada aqui muda visual, texturas ou mecânica.
+   Só reduz trabalho redundante de CPU/GPU. No modo PC nada é alterado.
+   ================================================================ */
+var Perf = {
+  // ---- ajustes ----
+  CAP_HZ: 60,          // telas de 110Hz+ (120/144Hz) renderizam a 60 quadros/s (metade da carga, mesma fluidez de jogo)
+  SHADOW_HZ: 30,       // sombra da lâmpada atualiza 30x/s (a 60x/s só enquanto uma porta se move)
+  ADAPTIVE_RES: true,  // rede de segurança: só reduz a resolução se o aparelho ficar abaixo de ~42 fps
+  SLOW_MS: 24,
+  MIN_RATIO: 1.25,
+  // ---- estado ----
+  ratio: 1, nextT: 0, shadowAcc: 0, wasMoving: false,
+  hz: 0, hzSum: 0, hzN: 0, lastRaf: 0, cap: false,
+  warm: 0, sum: 0, n: 0, frozen: false, dyn: []
+};
+function perfReset() {
+  Perf.nextT = 0; Perf.shadowAcc = 0; Perf.wasMoving = false;
+  Perf.hz = 0; Perf.hzSum = 0; Perf.hzN = 0; Perf.lastRaf = performance.now(); Perf.cap = false;
+  Perf.warm = 0; Perf.sum = 0; Perf.n = 0;
+}
+// Objetos que nunca se movem deixam de ter a matriz recalculada todo quadro.
+// Só portas e pás do ventilador continuam sendo atualizadas.
+function freezeStaticScene() {
+  if (Perf.frozen) return;
+  scene.updateMatrixWorld(true);
+  var dyn = [];
+  if (objs.door_left) dyn.push(objs.door_left);
+  if (objs.door_right) dyn.push(objs.door_right);
+  if (fanBlades) dyn.push(fanBlades);
+  dyn.forEach(function(d) { d.traverse(function(o) { o.userData._dyn = true; }); });
+  scene.traverse(function(o) { if (o !== scene && !o.userData._dyn) o.matrixAutoUpdate = false; });
+  scene.autoUpdate = false;
+  Perf.dyn = dyn;
+  Perf.frozen = true;
+}
+function adaptResolution(frameMs) {
+  if (!Perf.ADAPTIVE_RES || frameMs > 120) return;   // ignora travadas pontuais (troca de app, compilação de shader)
+  Perf.warm += frameMs;
+  if (Perf.warm < 3000) return;                       // aquecimento de 3 s
+  Perf.sum += frameMs; Perf.n++;
+  if (Perf.n < 90) return;
+  var avg = Perf.sum / Perf.n; Perf.sum = 0; Perf.n = 0;
+  if (avg > Perf.SLOW_MS && Perf.ratio > Perf.MIN_RATIO) {
+    Perf.ratio = Math.max(Perf.MIN_RATIO, Perf.ratio - 0.25);
+    renderer.setPixelRatio(Perf.ratio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    Perf.warm = 2000;                                 // espera um pouco antes de avaliar de novo
+  }
+}
 
 function makeMat(color, rough, metal, opts) {
   opts = opts || {};
@@ -1777,6 +1831,7 @@ function applyViewport() {
   }
   camera.fov = baseFov;
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Perf.ratio);
   renderer.setSize(w, h);
 }
 
@@ -1794,9 +1849,10 @@ function init() {
     var container = document.getElementById('game');
     if (!container) throw new Error('Container não encontrado');
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stencil: false, powerPreference: 'high-performance' });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    Perf.ratio = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(Perf.ratio);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputEncoding = THREE.sRGBEncoding;
@@ -1864,6 +1920,12 @@ function init() {
   }
 }
 
+function getDoorLedMat(side) {
+  var k = 'door_led_closed_' + side;
+  if (!objs[k]) objs[k] = makeMat(0x000000, 0.3, 0.2, { emissive: 0xff1a00, emissiveIntensity: 2.5 });
+  return objs[k];
+}
+
 /* ================================================================
    CONTROLES
    ================================================================ */
@@ -1891,20 +1953,23 @@ var _hudCache = {};
 function setHTML(id, html) {
   if (_hudCache[id] !== html) { _hudCache[id] = html; document.getElementById(id).innerHTML = html; }
 }
+var _hudEls = {};
+function _hudEl(id) { return _hudEls[id] || (_hudEls[id] = { el: document.getElementById(id), t: null, w: null, a: null }); }
+function setText(id, v) { var c = _hudEl(id); if (c.t !== v) { c.t = v; c.el.textContent = v; } }
+function setWidth(id, v) { var c = _hudEl(id); if (c.w !== v) { c.w = v; c.el.style.width = v; } }
+function setActive(id, on) { var c = _hudEl(id); if (c.a !== on) { c.a = on; c.el.classList.toggle('active', on); } }
 function updateHUD() {
-  document.getElementById('power-display').textContent = Math.floor(Game.power) + '%';
-  document.getElementById('power-bar').style.width = Game.power + '%';
+  setText('power-display', Math.floor(Game.power) + '%');
+  setWidth('power-bar', (Math.round(Game.power * 10) / 10) + '%');
 
   var h12 = (Game.hour === 0 ? 12 : Game.hour);
   var mm = String(Math.floor(Game.hourProgress * 60));
   if (mm.length < 2) mm = '0' + mm;
-  document.getElementById('time-display').textContent = h12 + ':' + mm + ' AM';
+  setText('time-display', h12 + ':' + mm + ' AM');
 
-  document.getElementById('sys-cam').textContent = '0.1';
-  document.getElementById('sys-doors').textContent =
-    ((Game.doors.left ? 1.2 : 0) + (Game.doors.right ? 1.2 : 0)).toFixed(1);
-  document.getElementById('sys-lights').textContent =
-    ((Game.lights.left ? 0.8 : 0) + (Game.lights.right ? 0.8 : 0)).toFixed(1);
+  setText('sys-cam', '0.1');
+  setText('sys-doors', ((Game.doors.left ? 1.2 : 0) + (Game.doors.right ? 1.2 : 0)).toFixed(1));
+  setText('sys-lights', ((Game.lights.left ? 0.8 : 0) + (Game.lights.right ? 0.8 : 0)).toFixed(1));
 
   var bars = Math.min(4, Game.usage);
   var html = '';
@@ -1922,11 +1987,11 @@ function updateHUD() {
   setHTML('btn-monitor',
     'MONITOR DE CÂMERAS<small>' + (Game.monitorOpen ? 'ATIVO' : 'ESPAÇO') + '</small>');
 
-  document.getElementById('btn-left-door').classList.toggle('active', Game.doors.left);
-  document.getElementById('btn-right-door').classList.toggle('active', Game.doors.right);
-  document.getElementById('btn-left-light').classList.toggle('active', Game.lights.left);
-  document.getElementById('btn-right-light').classList.toggle('active', Game.lights.right);
-  document.getElementById('btn-monitor').classList.toggle('active', Game.monitorOpen);
+  setActive('btn-left-door', Game.doors.left);
+  setActive('btn-right-door', Game.doors.right);
+  setActive('btn-left-light', Game.lights.left);
+  setActive('btn-right-light', Game.lights.right);
+  setActive('btn-monitor', Game.monitorOpen);
 }
 
 /* ================================================================
@@ -1940,6 +2005,12 @@ function startNight() {
   Game.hour = 0; Game.hourProgress = 0;
   Game.power = 100; Game.usage = 1;
   Game.flickerNext = 3;
+  perfReset();
+  getDoorLedMat('left'); getDoorLedMat('right');
+  var mob = Mode.current === 'mobile';
+  renderer.shadowMap.autoUpdate = !mob;     // celular: sombra controlada pelo loop
+  renderer.shadowMap.needsUpdate = true;
+  if (mob) freezeStaticScene();
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('hud').classList.remove('hidden');
   document.getElementById('controls').classList.remove('hidden');
@@ -2010,11 +2081,11 @@ function update(dt) {
     var dLight = objs['door_light_' + side];
     if (Game.doors[side]) {
       var pulse = 0.7 + Math.sin(Game.ambientTime * 4) * 0.3;
-      if (led) led.material = makeMat(0x000000, 0.3, 0.2, { emissive: 0xff1a00, emissiveIntensity: 2.5 * pulse });
+      if (led) { var cm = getDoorLedMat(side); cm.emissiveIntensity = 2.5 * pulse; if (led.material !== cm) led.material = cm; }
       if (halo) halo.intensity = 0.9 * pulse;
       if (dLight) dLight.intensity += (0.7 - dLight.intensity) * dt * 4;
     } else {
-      if (led) led.material = MAT.ledRed;
+      if (led && led.material !== MAT.ledRed) led.material = MAT.ledRed;
       if (halo) halo.intensity = 0.4;
       if (dLight) dLight.intensity += (0 - dLight.intensity) * dt * 4;
     }
@@ -2062,14 +2133,16 @@ function update(dt) {
   if (objs.radioLeds) {
     var toggle = Math.floor(Game.ambientTime * 3) % 2;
     for (var rl = 0; rl < objs.radioLeds.length; rl++) {
-      objs.radioLeds[rl].material = (rl === toggle) ? MAT.ledRed : MAT.plasticBlack;
+      var rm = (rl === toggle) ? MAT.ledRed : MAT.plasticBlack;
+      if (objs.radioLeds[rl].material !== rm) objs.radioLeds[rl].material = rm;
     }
   }
 
   // LED câmera
   if (objs.secCamLed) {
     var on2 = Math.sin(Game.ambientTime * 2) > 0;
-    objs.secCamLed.material = on2 ? MAT.ledRed : MAT.plasticBlack;
+    var cmat = on2 ? MAT.ledRed : MAT.plasticBlack;
+    if (objs.secCamLed.material !== cmat) objs.secCamLed.material = cmat;
   }
 
   // Monitor screen
@@ -2093,9 +2166,44 @@ function update(dt) {
 function loop(now) {
   if (!Game.running) return;
   if (Game.paused) { Game.lastFrame = now; requestAnimationFrame(loop); return; }
-  var dt = Math.min(0.1, (now - Game.lastFrame) / 1000);
+  var mobile = Mode.current === 'mobile';
+
+  if (mobile) {
+    // estima a taxa de atualização da tela nos primeiros quadros
+    if (Perf.hz === 0) {
+      var gap = now - Perf.lastRaf; Perf.lastRaf = now;
+      if (gap > 0 && gap < 50) { Perf.hzSum += gap; Perf.hzN++; }
+      if (Perf.hzN >= 45) { Perf.hz = 1000 / (Perf.hzSum / Perf.hzN); Perf.cap = Perf.hz >= 110; }
+    }
+    // tela de 120/144Hz: renderiza a 60 quadros/s
+    if (Perf.cap) {
+      var step = 1000 / Perf.CAP_HZ;
+      if (Perf.nextT === 0) Perf.nextT = now;
+      if (now < Perf.nextT - 1) { requestAnimationFrame(loop); return; }
+      Perf.nextT += step;
+      if (Perf.nextT < now - step) Perf.nextT = now;
+    }
+  }
+
+  var frameMs = now - Game.lastFrame;
+  var dt = Math.min(0.1, frameMs / 1000);
   Game.lastFrame = now;
   update(dt);
+
+  if (mobile) {
+    // matrizes: só o que se mexe
+    for (var d = 0; d < Perf.dyn.length; d++) Perf.dyn[d].updateMatrixWorld(true);
+    // sombra: 30x/s, e a cada quadro enquanto uma porta se move (e no quadro em que ela para)
+    Perf.shadowAcc += dt;
+    var moving = Game.doorAnim.left !== Game.doorTarget.left || Game.doorAnim.right !== Game.doorTarget.right;
+    if (moving || Perf.wasMoving || Perf.shadowAcc >= 1 / Perf.SHADOW_HZ - 0.004) {
+      renderer.shadowMap.needsUpdate = true;
+      Perf.shadowAcc = 0;
+    }
+    Perf.wasMoving = moving;
+    adaptResolution(frameMs);
+  }
+
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
