@@ -939,22 +939,26 @@ var renderer, scene, camera, objs = {};
 
 var Perf = {
   CAP_HZ: 60,
+  LOW_CAP_HZ: 30,
   SHADOW_HZ: 30,
   ADAPTIVE_RES: true,
-  SLOW_MS: 22,
-  GOOD_MS: 13,
-  MIN_RATIO: 0.35,
+  SLOW_MS: 20,
+  GOOD_MS: 12,
+  MIN_RATIO: 0.32,
   ratio: 1, nextT: 0, shadowAcc: 0, wasMoving: false,
   hz: 0, hzSum: 0, hzN: 0, lastRaf: 0, cap: false,
   warm: 0, sum: 0, n: 0, frozen: false, dyn: [],
-  lowScale: 0.75,
-  perfBad: 0, perfGood: 0, adaptSkip: 0
+  /* BAIXOS começa em ~55% e pode cair até ~35% se o frame estiver pesado */
+  lowScale: 0.55,
+  perfBad: 0, perfGood: 0, adaptSkip: 0,
+  lowAcc: 0, lowSkipHud: 0
 };
 function perfReset() {
   Perf.nextT = 0; Perf.shadowAcc = 0; Perf.wasMoving = false;
   Perf.hz = 0; Perf.hzSum = 0; Perf.hzN = 0; Perf.lastRaf = performance.now(); Perf.cap = false;
   Perf.warm = 0; Perf.sum = 0; Perf.n = 0;
-  Perf.lowScale = 0.75; Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
+  Perf.lowScale = 0.55; Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
+  Perf.lowAcc = 0; Perf.lowSkipHud = 0;
 }
 function freezeStaticScene() {
   if (Perf.frozen) return;
@@ -980,24 +984,25 @@ function adaptResolution(frameMs) {
   if (Game.monitorOpen && NS.on) return;
   if (frameMs > 150) { Perf.sum = 0; Perf.n = 0; return; }
   Perf.warm += frameMs;
-  if (Perf.warm < 2500) return;
+  if (Perf.warm < 1200) return;
   Perf.sum += frameMs; Perf.n++;
-  if (Perf.n < 60) return;
+  if (Perf.n < 40) return;
   var avg = Perf.sum / Perf.n;
   Perf.sum = 0; Perf.n = 0;
   if (Perf.adaptSkip > 0) { Perf.adaptSkip--; return; }
   var changed = false;
-  if (avg > Perf.SLOW_MS && Perf.lowScale > 0.5) {
+  /* Desce rápido se estiver lento; sobe devagar se sobrar folga */
+  if (avg > Perf.SLOW_MS && Perf.lowScale > 0.35) {
     Perf.perfBad++; Perf.perfGood = 0;
-    if (Perf.perfBad >= 2) {
-      Perf.lowScale = Math.max(0.5, Perf.lowScale - 0.0625);
+    if (Perf.perfBad >= 1) {
+      Perf.lowScale = Math.max(0.35, Perf.lowScale - 0.08);
       Perf.perfBad = 0;
       changed = true;
     }
-  } else if (avg < Perf.GOOD_MS && Perf.lowScale < 0.75) {
+  } else if (avg < Perf.GOOD_MS && Perf.lowScale < 0.55) {
     Perf.perfGood++; Perf.perfBad = 0;
-    if (Perf.perfGood >= 4) {
-      Perf.lowScale = Math.min(0.75, Perf.lowScale + 0.0625);
+    if (Perf.perfGood >= 5) {
+      Perf.lowScale = Math.min(0.55, Perf.lowScale + 0.05);
       Perf.perfGood = 0;
       changed = true;
     }
@@ -1008,7 +1013,8 @@ function adaptResolution(frameMs) {
   if (changed) {
     Perf.ratio = gfxBaseRatio();
     renderer.setPixelRatio(Perf.ratio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    var _sz = (typeof getViewSize === 'function') ? getViewSize() : { w: window.innerWidth, h: window.innerHeight };
+    renderer.setSize(Math.max(1, _sz.w), Math.max(1, _sz.h), false);
     Perf.warm = 0;
     Perf.adaptSkip = 2;
   }
@@ -1016,7 +1022,8 @@ function adaptResolution(frameMs) {
 
 var GFX_KEY = 'fn_gfx';
 var GFX_LEVELS = {
-  low:    { name: 'BAIXOS', ratioMul: 0.75, dprCap: 1.5, native: false, shadows: false, shadowType: THREE.BasicShadowMap,   shadowSize: 512,  aniso: 1,  mip: THREE.LinearMipmapNearestFilter, aa: false },
+  /* BAIXOS: resolução baixa, sem AA/sombras, texturas leves — mapa igual, bem menos GPU */
+  low:    { name: 'BAIXOS', ratioMul: 0.55, dprCap: 1.0, native: false, shadows: false, shadowType: THREE.BasicShadowMap,   shadowSize: 256,  aniso: 1,  mip: THREE.NearestFilter, aa: false },
   medium: { name: 'MÉDIOS', ratioMul: 1,    native: false, shadows: true,  shadowType: THREE.PCFShadowMap,       shadowSize: 1024, aniso: 4,  mip: THREE.LinearMipmapLinearFilter,  aa: true },
   high:   { name: 'ALTOS',  ratioMul: 1,    native: true,  shadows: true,  shadowType: THREE.PCFSoftShadowMap,   shadowSize: 2048, aniso: 16, mip: THREE.LinearMipmapLinearFilter,  aa: true }
 };
@@ -1038,7 +1045,7 @@ function gfxBaseRatio() {
   return Math.max(0.35, r);
 }
 /* Monitor de câmeras: 80% da resolução de referência em escala linear, fixo no modo BAIXOS */
-var MONITOR_SCALE = 0.8;
+var MONITOR_SCALE = 0.65;
 function gfxMonitorRatio() {
   if (Gfx.level !== 'low') return gfxBaseRatio();
   var cfg = gfxCfg(), dpr = window.devicePixelRatio || 1;
@@ -1154,12 +1161,32 @@ function applyAuxLightLevel() {
   }
 }
 
+function gfxApplyLowPerf() {
+  if (!renderer) return;
+  var low = (Gfx.level === 'low');
+  /* ACES é caro no fragment shader; Linear mantém contraste aceitável com bem menos custo */
+  renderer.toneMapping = low ? THREE.LinearToneMapping : THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = low ? 1.05 : 1.0;
+  renderer.sortObjects = !low;
+  if (scene && scene.fog) {
+    scene.fog.density = low ? 0.032 : (Game.monitorOpen && NS.on ? 0.02 : 0.04);
+  }
+  if (low) {
+    try { freezeStaticScene(); } catch (e) {}
+  } else if (Perf.frozen) {
+    /* Volta a atualizar matrizes de tudo ao sair de BAIXOS */
+    scene.autoUpdate = true;
+    scene.traverse(function (o) { if (o !== scene) o.matrixAutoUpdate = true; });
+    Perf.frozen = false;
+    Perf.dyn = [];
+  }
+}
 function gfxApply(level, persist) {
   if (!GFX_LEVELS[level]) level = 'medium';
   Gfx.level = level;
   if (persist) { try { localStorage.setItem(GFX_KEY, level); } catch (e) {} }
   if (renderer && scene && camera) {
-    Perf.lowScale = 0.75;
+    Perf.lowScale = (level === 'low') ? 0.55 : 0.75;
     Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
     Perf.ratio = gfxBaseRatio();
     Perf.MIN_RATIO = Math.min(1.25, Perf.ratio);
@@ -1173,6 +1200,7 @@ function gfxApply(level, persist) {
     applyAuxLightLevel();
     lsApplyLevel();
     applyFanLevel();
+    gfxApplyLowPerf();
   }
   gfxSyncUI();
 }
@@ -1296,8 +1324,8 @@ function makeMat(color, rough, metal, opts) {
   return m;
 }
 
-/* Texturas: em BAIXOS, cap em 256px para reduzir memória e custo de upload */
-var TEX_LOW_CAP = 256;
+/* Texturas: em BAIXOS, cap em 128px (menos VRAM/upload; o mapa continua legível) */
+var TEX_LOW_CAP = 128;
 function makeTexture(size, drawFn, repX, repY) {
   if (Gfx.level === 'low' && size > TEX_LOW_CAP) size = TEX_LOW_CAP;
   var c = document.createElement('canvas');
@@ -1949,7 +1977,7 @@ function lsUpdate(dt) {
   var n = LS.list.length; if (!n) return;
   var low = (Gfx.level === 'low');
   LS.acc += dt;
-  if (low && LS.acc < 0.05) return;
+  if (low && LS.acc < 0.085) return;
   var d = Math.min(LS.acc, 0.1); LS.acc = 0; LS.time += d;
   var i, j, f;
   for (i = 0; i < n; i++) {
@@ -3141,7 +3169,7 @@ function init() {
     var container = document.getElementById('game');
     if (!container) throw new Error('Container não encontrado');
 
-    renderer = new THREE.WebGLRenderer({ antialias: gfxCfg().aa, alpha: false, stencil: false, powerPreference: 'high-performance' });
+    renderer = new THREE.WebGLRenderer({ antialias: gfxCfg().aa, alpha: false, stencil: false, depth: true, powerPreference: 'high-performance' });
     renderer.setSize(window.innerWidth, window.innerHeight);
     Gfx.aaCtx = gfxCfg().aa;
     Perf.ratio = gfxBaseRatio();
@@ -3150,8 +3178,9 @@ function init() {
     renderer.shadowMap.enabled = gfxCfg().shadows;
     renderer.shadowMap.type = gfxCfg().shadowType;
     renderer.outputEncoding = THREE.sRGBEncoding;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMapping = (Gfx.level === 'low') ? THREE.LinearToneMapping : THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = (Gfx.level === 'low') ? 1.05 : 1.0;
+    renderer.sortObjects = (Gfx.level !== 'low');
     container.insertBefore(renderer.domElement, container.firstChild);
 
     scene = new THREE.Scene();
@@ -3323,9 +3352,11 @@ function _startNightCore() {
   perfReset();
   getDoorLedMat('left'); getDoorLedMat('right');
   var mob = Mode.current === 'mobile';
-  renderer.shadowMap.autoUpdate = !mob;
+  var lowGfx = (Gfx.level === 'low');
+  renderer.shadowMap.autoUpdate = !mob && !lowGfx;
   renderer.shadowMap.needsUpdate = true;
-  if (mob) freezeStaticScene();
+  if (mob || lowGfx) freezeStaticScene();
+  if (typeof gfxApplyLowPerf === 'function') gfxApplyLowPerf();
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('hud').classList.remove('hidden');
   document.getElementById('controls').classList.remove('hidden');
@@ -3337,6 +3368,7 @@ function _startNightCore() {
 
 function update(dt) {
   if (Game.over) { phoneKill(); NS.jumpUpdate(dt); return; }
+  var _lowGfx = (Gfx.level === 'low');
   Game.ambientTime += dt;
 
   Game.hourProgress += dt / Game.HOUR_DURATION;
@@ -3369,24 +3401,36 @@ function update(dt) {
     group.position.y = doorH * (2 - cur);
   });
 
-  /* Luzes funcionais das portas: sempre ativas (mantidas em BAIXOS, pois são jogabilidade) */
+  /* Luzes funcionais das portas: sempre ativas (jogabilidade). Em BAIXOS: set direto, sem lerp/sin por quadro */
   var targetL = Game.lights.left ? 1.4 : 0;
   var targetR = Game.lights.right ? 1.4 : 0;
-  if (objs.corrLightLeft) objs.corrLightLeft.intensity += (targetL - objs.corrLightLeft.intensity) * dt * 20;
-  if (objs.corrLightRight) objs.corrLightRight.intensity += (targetR - objs.corrLightRight.intensity) * dt * 20;
+  if (objs.corrLightLeft) {
+    if (_lowGfx) objs.corrLightLeft.intensity = targetL;
+    else objs.corrLightLeft.intensity += (targetL - objs.corrLightLeft.intensity) * dt * 20;
+  }
+  if (objs.corrLightRight) {
+    if (_lowGfx) objs.corrLightRight.intensity = targetR;
+    else objs.corrLightRight.intensity += (targetR - objs.corrLightRight.intensity) * dt * 20;
+  }
   /* Luzes de fundo: decorativas — desativadas em BAIXOS */
   if (objs.corrBackLightLeft) {
-    var tBL = (Gfx.level === 'low') ? 0 : (Game.lights.left ? 0.7 : 0);
-    objs.corrBackLightLeft.intensity += (tBL - objs.corrBackLightLeft.intensity) * dt * 20;
+    if (_lowGfx) objs.corrBackLightLeft.intensity = 0;
+    else {
+      var tBL = Game.lights.left ? 0.7 : 0;
+      objs.corrBackLightLeft.intensity += (tBL - objs.corrBackLightLeft.intensity) * dt * 20;
+    }
   }
   if (objs.corrBackLightRight) {
-    var tBR = (Gfx.level === 'low') ? 0 : (Game.lights.right ? 0.7 : 0);
-    objs.corrBackLightRight.intensity += (tBR - objs.corrBackLightRight.intensity) * dt * 20;
+    if (_lowGfx) objs.corrBackLightRight.intensity = 0;
+    else {
+      var tBR = Game.lights.right ? 0.7 : 0;
+      objs.corrBackLightRight.intensity += (tBR - objs.corrBackLightRight.intensity) * dt * 20;
+    }
   }
 
-  /* Brilho tênue da Área de Refeições: apagado nas câmeras e em BAIXOS */
-  if (NS.dg) {
-    var dgT = (Gfx.level === 'low' || (Game.monitorOpen && NS.on)) ? 0 : 1;
+  /* Brilho da Área de Refeições: apagado em BAIXOS / câmeras */
+  if (NS.dg && !_lowGfx) {
+    var dgT = (Game.monitorOpen && NS.on) ? 0 : 1;
     for (var dgI = 0; dgI < NS.dg.length; dgI++) {
       var dgL = NS.dg[dgI];
       dgL.intensity += (dgT * dgL.userData.base - dgL.intensity) * Math.min(1, dt * 20);
@@ -3406,14 +3450,24 @@ function update(dt) {
     var halo = objs['door_halo_' + side];
     var dLight = objs['door_light_' + side];
     if (Game.doors[side]) {
-      var pulse = 0.7 + Math.sin(Game.ambientTime * 4) * 0.3;
-      if (led) { var cm = getDoorLedMat(side); cm.emissiveIntensity = 2.5 * pulse; if (led.material !== cm) led.material = cm; }
-      if (halo) halo.intensity = 0.9 * pulse;
-      if (dLight) dLight.intensity += (0.7 - dLight.intensity) * dt * 4;
+      if (_lowGfx) {
+        /* Sem pulso senoidal por frame — brilho fixo */
+        if (led) { var cm = getDoorLedMat(side); cm.emissiveIntensity = 2.2; if (led.material !== cm) led.material = cm; }
+        if (halo) halo.intensity = 0.75;
+        if (dLight) dLight.intensity = 0.55;
+      } else {
+        var pulse = 0.7 + Math.sin(Game.ambientTime * 4) * 0.3;
+        if (led) { var cm2 = getDoorLedMat(side); cm2.emissiveIntensity = 2.5 * pulse; if (led.material !== cm2) led.material = cm2; }
+        if (halo) halo.intensity = 0.9 * pulse;
+        if (dLight) dLight.intensity += (0.7 - dLight.intensity) * dt * 4;
+      }
     } else {
       if (led && led.material !== MAT.ledRed) led.material = MAT.ledRed;
       if (halo) halo.intensity = 0.4;
-      if (dLight) dLight.intensity += (0 - dLight.intensity) * dt * 4;
+      if (dLight) {
+        if (_lowGfx) dLight.intensity = 0;
+        else dLight.intensity += (0 - dLight.intensity) * dt * 4;
+      }
     }
   });
 
@@ -3498,13 +3552,19 @@ function update(dt) {
 
   phoneUpdate(dt);
   NS.update(dt);
-  updateHUD();
+  if (_lowGfx) {
+    Perf.lowSkipHud = (Perf.lowSkipHud || 0) + 1;
+    if (Perf.lowSkipHud >= 2) { Perf.lowSkipHud = 0; updateHUD(); }
+  } else {
+    updateHUD();
+  }
 }
 
 function loop(now) {
   if (!Game.running) return;
   if (Game.paused) { Game.lastFrame = now; requestAnimationFrame(loop); return; }
   var mobile = Mode.current === 'mobile';
+  var low = (Gfx.level === 'low');
 
   {
     if (Perf.hz === 0) {
@@ -3512,8 +3572,14 @@ function loop(now) {
       if (gap > 0 && gap < 50) { Perf.hzSum += gap; Perf.hzN++; }
       if (Perf.hzN >= 45) { Perf.hz = 1000 / (Perf.hzSum / Perf.hzN); Perf.cap = Perf.hz >= 110; }
     }
-    /* Em BAIXOS, não aplica cap de FPS — permite aproveitar taxas de atualização mais altas */
-    if (Perf.cap && Gfx.level !== 'low') {
+    /* BAIXOS: ritmo ~30 FPS estável (mais liso em aparelhos fracos). Outros modos: cap 60 se o ecrã for 120+. */
+    if (low) {
+      var stepL = 1000 / Perf.LOW_CAP_HZ;
+      if (Perf.nextT === 0) Perf.nextT = now;
+      if (now < Perf.nextT - 1) { requestAnimationFrame(loop); return; }
+      Perf.nextT += stepL;
+      if (Perf.nextT < now - stepL) Perf.nextT = now;
+    } else if (Perf.cap) {
       var step = 1000 / Perf.CAP_HZ;
       if (Perf.nextT === 0) Perf.nextT = now;
       if (now < Perf.nextT - 1) { requestAnimationFrame(loop); return; }
@@ -3527,22 +3593,22 @@ function loop(now) {
   Game.lastFrame = now;
   update(dt);
 
-  if (mobile) {
+  /* Matrizes: só objetos dinâmicos quando a cena estática está congelada (BAIXOS / mobile) */
+  if (Perf.frozen) {
     for (var d = 0; d < Perf.dyn.length; d++) Perf.dyn[d].updateMatrixWorld(true);
-    if (gfxCfg().shadows) {
-      Perf.shadowAcc += dt;
-      var moving = Game.doorAnim.left !== Game.doorTarget.left || Game.doorAnim.right !== Game.doorTarget.right;
-      if (moving || Perf.wasMoving || Perf.shadowAcc >= 1 / Perf.SHADOW_HZ - 0.004) {
-        renderer.shadowMap.needsUpdate = true;
-        Perf.shadowAcc = 0;
-      }
-      Perf.wasMoving = moving;
-    }
   }
-  /* Resolução dinâmica 75%→50% — só em BAIXOS, em qualquer plataforma */
+  if (mobile && gfxCfg().shadows) {
+    Perf.shadowAcc += dt;
+    var moving = Game.doorAnim.left !== Game.doorTarget.left || Game.doorAnim.right !== Game.doorTarget.right;
+    if (moving || Perf.wasMoving || Perf.shadowAcc >= 1 / Perf.SHADOW_HZ - 0.004) {
+      renderer.shadowMap.needsUpdate = true;
+      Perf.shadowAcc = 0;
+    }
+    Perf.wasMoving = moving;
+  }
+  /* Resolução dinâmica — só em BAIXOS */
   adaptResolution(frameMs);
 
-  /* Degradês de sombra: um único upload por quadro se algum animatrônico se moveu */
   if (FS.on && FS.needsUpload) {
     FS.attr.needsUpdate = true;
     FS.needsUpload = false;
