@@ -184,6 +184,41 @@
 
   .mode-mobile #vignette { transform:translateZ(0); }
 
+
+/* === CELULAR v2: controles compactos e campo de visão desobstruído === */
+#game.mode-mobile { --bw:clamp(88px,17vw,128px); --bh:clamp(30px,8.3vh,43px); --gap:clamp(4px,1.5vh,9px); --fs:clamp(9px,1.7vh,12px); }
+.mode-mobile .ctrl-btn {background:rgba(5,3,3,.69); border:1px solid rgba(211,198,182,.3); border-radius:5px; letter-spacing:.02em; padding-left:18px; padding-right:5px; line-height:1.1; backdrop-filter:none;}
+.mode-mobile .ctrl-btn::before {left:6px;width:5px;height:5px;margin-top:-2.5px;}
+.mode-mobile .ctrl-btn small {font-size:clamp(8px,1.4vh,10px); letter-spacing:0;}
+.mode-mobile #btn-left-door,.mode-mobile #btn-right-door {bottom:calc(var(--sb) + var(--bh) + var(--gap));}
+.mode-mobile #btn-right-door,.mode-mobile #btn-right-light {padding-left:5px;padding-right:18px;}
+.mode-mobile #btn-right-door::before,.mode-mobile #btn-right-light::before {right:6px;left:auto;}
+.mode-mobile #btn-monitor {width:clamp(108px,21vw,156px);height:clamp(33px,9vh,46px);padding:2px 5px 2px 17px;font-size:clamp(9px,1.65vh,11px);}
+.mode-mobile #btn-monitor::before {left:5px;width:10px;height:8px;margin-top:-4px;}
+.mode-mobile #hud-left {width:clamp(104px,19vw,150px);padding:2px 6px 2px 8px;}
+.mode-mobile #hud-right {min-width:0;padding:2px 8px 2px 6px;}
+.mode-mobile .sys-row {gap:5px;font-size:clamp(7px,1.25vh,10px)}
+.mode-mobile .hud-label {font-size:clamp(8px,1.35vh,10px)}
+.mode-mobile #hud .power-value,.mode-mobile #hud .time-value {font-size:clamp(13px,3.4vh,21px)}
+/* Quando o monitor está ativo, portas e luzes não recebem nem interceptam toque. */
+#game.mode-mobile.monitor-visible #btn-left-door,
+#game.mode-mobile.monitor-visible #btn-right-door,
+#game.mode-mobile.monitor-visible #btn-left-light,
+#game.mode-mobile.monitor-visible #btn-right-light {display:none!important;pointer-events:none!important;}
+/* Mapa da câmera não bloqueia toda a visão no celular. */
+#game.mode-mobile #cam-map {right:var(--sr)!important;top:auto!important;bottom:calc(var(--sb) + 51px)!important;width:clamp(126px,24vw,190px)!important;max-height:44vh!important;aspect-ratio:264/240!important;}
+#game.mode-mobile #cam-label {left:var(--sl)!important;bottom:calc(var(--sb) + 55px)!important;font-size:clamp(10px,2vh,14px)!important;max-width:42vw;}
+#game.mode-mobile #cam-label small {font-size:9px;letter-spacing:.04em;}
+#game.mode-mobile #cam-ui {pointer-events:none;}
+#game.mode-mobile #cam-view,#game.mode-mobile #cam-map,#game.mode-mobile #cam-mobile-nav {pointer-events:auto;}
+#cam-mobile-nav {display:none;}
+#game.mode-mobile #cam-ui:not(.off) #cam-mobile-nav {display:flex;position:absolute;z-index:8;right:var(--sr);bottom:var(--sb);gap:7px;align-items:center;}
+#cam-mobile-nav button {touch-action:manipulation;min-width:39px;height:37px;padding:0 9px;border:1px solid #75685c;border-radius:5px;background:rgba(0,0,0,.84);color:#ddd0bd;font:12px 'Courier New',monospace;}
+#cam-mobile-nav .cam-current {min-width:67px;text-align:center;font-size:10px;white-space:nowrap;}
+#game.mode-mobile #cam-map .mk circle {stroke-width:1.3;}
+#game.mode-mobile #cam-map svg {touch-action:manipulation;}
+@media (max-height:390px) {#game.mode-mobile #cam-map {width:clamp(106px,20vw,155px)!important;} #game.mode-mobile #cam-label {bottom:calc(var(--sb) + 43px)!important;} #game.mode-mobile #cam-mobile-nav button {height:31px;}}
+
   /* BAIXOS: nenhuma sombra de CSS (box/text-shadow, drop-shadow) — vira degradê preto barato */
   html.gfx-low *, html.gfx-low *::before, html.gfx-low *::after { box-shadow:none !important; text-shadow:none !important; }
   html.gfx-low .hud-corner { background-image:radial-gradient(ellipse at 50% 50%, rgba(0,0,0,.5) 0%, rgba(0,0,0,.22) 55%, rgba(0,0,0,0) 80%); }
@@ -939,26 +974,22 @@ var renderer, scene, camera, objs = {};
 
 var Perf = {
   CAP_HZ: 60,
-  LOW_CAP_HZ: 30,
   SHADOW_HZ: 30,
   ADAPTIVE_RES: true,
-  SLOW_MS: 20,
-  GOOD_MS: 12,
-  MIN_RATIO: 0.32,
+  SLOW_MS: 22,
+  GOOD_MS: 13,
+  MIN_RATIO: 0.35,
   ratio: 1, nextT: 0, shadowAcc: 0, wasMoving: false,
   hz: 0, hzSum: 0, hzN: 0, lastRaf: 0, cap: false,
   warm: 0, sum: 0, n: 0, frozen: false, dyn: [],
-  /* BAIXOS começa em ~55% e pode cair até ~35% se o frame estiver pesado */
-  lowScale: 0.55,
-  perfBad: 0, perfGood: 0, adaptSkip: 0,
-  lowAcc: 0, lowSkipHud: 0
+  lowScale: 0.75,
+  perfBad: 0, perfGood: 0, adaptSkip: 0
 };
 function perfReset() {
   Perf.nextT = 0; Perf.shadowAcc = 0; Perf.wasMoving = false;
   Perf.hz = 0; Perf.hzSum = 0; Perf.hzN = 0; Perf.lastRaf = performance.now(); Perf.cap = false;
   Perf.warm = 0; Perf.sum = 0; Perf.n = 0;
-  Perf.lowScale = 0.55; Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
-  Perf.lowAcc = 0; Perf.lowSkipHud = 0;
+  Perf.lowScale = 0.75; Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
 }
 function freezeStaticScene() {
   if (Perf.frozen) return;
@@ -984,25 +1015,24 @@ function adaptResolution(frameMs) {
   if (Game.monitorOpen && NS.on) return;
   if (frameMs > 150) { Perf.sum = 0; Perf.n = 0; return; }
   Perf.warm += frameMs;
-  if (Perf.warm < 1200) return;
+  if (Perf.warm < 2500) return;
   Perf.sum += frameMs; Perf.n++;
-  if (Perf.n < 40) return;
+  if (Perf.n < 60) return;
   var avg = Perf.sum / Perf.n;
   Perf.sum = 0; Perf.n = 0;
   if (Perf.adaptSkip > 0) { Perf.adaptSkip--; return; }
   var changed = false;
-  /* Desce rápido se estiver lento; sobe devagar se sobrar folga */
-  if (avg > Perf.SLOW_MS && Perf.lowScale > 0.35) {
+  if (avg > Perf.SLOW_MS && Perf.lowScale > 0.5) {
     Perf.perfBad++; Perf.perfGood = 0;
-    if (Perf.perfBad >= 1) {
-      Perf.lowScale = Math.max(0.35, Perf.lowScale - 0.08);
+    if (Perf.perfBad >= 2) {
+      Perf.lowScale = Math.max(0.5, Perf.lowScale - 0.0625);
       Perf.perfBad = 0;
       changed = true;
     }
-  } else if (avg < Perf.GOOD_MS && Perf.lowScale < 0.55) {
+  } else if (avg < Perf.GOOD_MS && Perf.lowScale < 0.75) {
     Perf.perfGood++; Perf.perfBad = 0;
-    if (Perf.perfGood >= 5) {
-      Perf.lowScale = Math.min(0.55, Perf.lowScale + 0.05);
+    if (Perf.perfGood >= 4) {
+      Perf.lowScale = Math.min(0.75, Perf.lowScale + 0.0625);
       Perf.perfGood = 0;
       changed = true;
     }
@@ -1013,8 +1043,7 @@ function adaptResolution(frameMs) {
   if (changed) {
     Perf.ratio = gfxBaseRatio();
     renderer.setPixelRatio(Perf.ratio);
-    var _sz = (typeof getViewSize === 'function') ? getViewSize() : { w: window.innerWidth, h: window.innerHeight };
-    renderer.setSize(Math.max(1, _sz.w), Math.max(1, _sz.h), false);
+    renderer.setSize(window.innerWidth, window.innerHeight);
     Perf.warm = 0;
     Perf.adaptSkip = 2;
   }
@@ -1022,8 +1051,7 @@ function adaptResolution(frameMs) {
 
 var GFX_KEY = 'fn_gfx';
 var GFX_LEVELS = {
-  /* BAIXOS: resolução baixa, sem AA/sombras, texturas leves — mapa igual, bem menos GPU */
-  low:    { name: 'BAIXOS', ratioMul: 0.55, dprCap: 1.0, native: false, shadows: false, shadowType: THREE.BasicShadowMap,   shadowSize: 256,  aniso: 1,  mip: THREE.NearestFilter, aa: false },
+  low:    { name: 'BAIXOS', ratioMul: 0.75, dprCap: 1.5, native: false, shadows: false, shadowType: THREE.BasicShadowMap,   shadowSize: 512,  aniso: 1,  mip: THREE.LinearMipmapNearestFilter, aa: false },
   medium: { name: 'MÉDIOS', ratioMul: 1,    native: false, shadows: true,  shadowType: THREE.PCFShadowMap,       shadowSize: 1024, aniso: 4,  mip: THREE.LinearMipmapLinearFilter,  aa: true },
   high:   { name: 'ALTOS',  ratioMul: 1,    native: true,  shadows: true,  shadowType: THREE.PCFSoftShadowMap,   shadowSize: 2048, aniso: 16, mip: THREE.LinearMipmapLinearFilter,  aa: true }
 };
@@ -1045,7 +1073,7 @@ function gfxBaseRatio() {
   return Math.max(0.35, r);
 }
 /* Monitor de câmeras: 80% da resolução de referência em escala linear, fixo no modo BAIXOS */
-var MONITOR_SCALE = 0.65;
+var MONITOR_SCALE = 0.8;
 function gfxMonitorRatio() {
   if (Gfx.level !== 'low') return gfxBaseRatio();
   var cfg = gfxCfg(), dpr = window.devicePixelRatio || 1;
@@ -1161,32 +1189,12 @@ function applyAuxLightLevel() {
   }
 }
 
-function gfxApplyLowPerf() {
-  if (!renderer) return;
-  var low = (Gfx.level === 'low');
-  /* ACES é caro no fragment shader; Linear mantém contraste aceitável com bem menos custo */
-  renderer.toneMapping = low ? THREE.LinearToneMapping : THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = low ? 1.05 : 1.0;
-  renderer.sortObjects = !low;
-  if (scene && scene.fog) {
-    scene.fog.density = low ? 0.032 : (Game.monitorOpen && NS.on ? 0.02 : 0.04);
-  }
-  if (low) {
-    try { freezeStaticScene(); } catch (e) {}
-  } else if (Perf.frozen) {
-    /* Volta a atualizar matrizes de tudo ao sair de BAIXOS */
-    scene.autoUpdate = true;
-    scene.traverse(function (o) { if (o !== scene) o.matrixAutoUpdate = true; });
-    Perf.frozen = false;
-    Perf.dyn = [];
-  }
-}
 function gfxApply(level, persist) {
   if (!GFX_LEVELS[level]) level = 'medium';
   Gfx.level = level;
   if (persist) { try { localStorage.setItem(GFX_KEY, level); } catch (e) {} }
   if (renderer && scene && camera) {
-    Perf.lowScale = (level === 'low') ? 0.55 : 0.75;
+    Perf.lowScale = 0.75;
     Perf.perfBad = 0; Perf.perfGood = 0; Perf.adaptSkip = 0;
     Perf.ratio = gfxBaseRatio();
     Perf.MIN_RATIO = Math.min(1.25, Perf.ratio);
@@ -1200,7 +1208,6 @@ function gfxApply(level, persist) {
     applyAuxLightLevel();
     lsApplyLevel();
     applyFanLevel();
-    gfxApplyLowPerf();
   }
   gfxSyncUI();
 }
@@ -1324,8 +1331,8 @@ function makeMat(color, rough, metal, opts) {
   return m;
 }
 
-/* Texturas: em BAIXOS, cap em 128px (menos VRAM/upload; o mapa continua legível) */
-var TEX_LOW_CAP = 128;
+/* Texturas: em BAIXOS, cap em 256px para reduzir memória e custo de upload */
+var TEX_LOW_CAP = 256;
 function makeTexture(size, drawFn, repX, repY) {
   if (Gfx.level === 'low' && size > TEX_LOW_CAP) size = TEX_LOW_CAP;
   var c = document.createElement('canvas');
@@ -1977,7 +1984,7 @@ function lsUpdate(dt) {
   var n = LS.list.length; if (!n) return;
   var low = (Gfx.level === 'low');
   LS.acc += dt;
-  if (low && LS.acc < 0.085) return;
+  if (low && LS.acc < 0.05) return;
   var d = Math.min(LS.acc, 0.1); LS.acc = 0; LS.time += d;
   var i, j, f;
   for (i = 0; i < n; i++) {
@@ -3120,8 +3127,8 @@ function refreshOrientation() {
   var needRotate = Mode.current === 'mobile' && isPortrait();
   var ov = document.getElementById('rotate-overlay');
   ov.classList.toggle('hidden', !needRotate);
-  ov.classList.toggle('soft', !Game.running);
-  Game.paused = needRotate && Game.running;
+  ov.classList.toggle('soft', true);
+  Game.paused = false;
 }
 function tryLockLandscape() {
   try {
@@ -3148,7 +3155,7 @@ function applyViewport() {
   if (Mode.current === 'mobile' && camera.aspect < 16 / 9) {
     var hf = 2 * Math.atan(Math.tan(baseFov * Math.PI / 360) * (16 / 9));
     baseFov = 2 * Math.atan(Math.tan(hf / 2) / camera.aspect) * 180 / Math.PI;
-    baseFov = Math.min(baseFov, 100);
+    baseFov = Math.min(baseFov, 86);
   }
   camera.fov = baseFov;
   camera.updateProjectionMatrix();
@@ -3169,7 +3176,7 @@ function init() {
     var container = document.getElementById('game');
     if (!container) throw new Error('Container não encontrado');
 
-    renderer = new THREE.WebGLRenderer({ antialias: gfxCfg().aa, alpha: false, stencil: false, depth: true, powerPreference: 'high-performance' });
+    renderer = new THREE.WebGLRenderer({ antialias: gfxCfg().aa, alpha: false, stencil: false, powerPreference: 'high-performance' });
     renderer.setSize(window.innerWidth, window.innerHeight);
     Gfx.aaCtx = gfxCfg().aa;
     Perf.ratio = gfxBaseRatio();
@@ -3178,9 +3185,8 @@ function init() {
     renderer.shadowMap.enabled = gfxCfg().shadows;
     renderer.shadowMap.type = gfxCfg().shadowType;
     renderer.outputEncoding = THREE.sRGBEncoding;
-    renderer.toneMapping = (Gfx.level === 'low') ? THREE.LinearToneMapping : THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = (Gfx.level === 'low') ? 1.05 : 1.0;
-    renderer.sortObjects = (Gfx.level !== 'low');
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
     container.insertBefore(renderer.domElement, container.firstChild);
 
     scene = new THREE.Scene();
@@ -3258,19 +3264,27 @@ function getDoorLedMat(side) {
 }
 
 function toggleDoor(side) {
-  if (!Game.running || Game.over) return; NS.idle = 0;
+  if (!Game.running || Game.over || Game.monitorOpen) return; NS.idle = 0;
   Game.doors[side] = !Game.doors[side];
   Game.doorTarget[side] = Game.doors[side] ? 1 : 0;
   updateHUD();
 }
 function toggleLight(side) {
-  if (!Game.running || Game.over) return; NS.idle = 0;
+  if (!Game.running || Game.over || Game.monitorOpen) return;
+  NS.idle = 0;
   Game.lights[side] = !Game.lights[side];
+  /* Sincroniza imediatamente as luzes reais, sem depender do próximo frame. */
+  var on = Game.lights[side];
+  var main = objs['corrLight' + (side === 'left' ? 'Left' : 'Right')];
+  var back = objs['corrBackLight' + (side === 'left' ? 'Left' : 'Right')];
+  if (main) main.intensity = on ? 1.4 : 0;
+  if (back) back.intensity = on && Gfx.level !== 'low' ? 0.7 : 0;
   updateHUD();
 }
 function toggleMonitor() {
   if (!Game.running || Game.over) return; NS.idle = 0;
   Game.monitorOpen = !Game.monitorOpen;
+  document.getElementById('game').classList.toggle('monitor-visible', Game.monitorOpen);
   NS.show(Game.monitorOpen);
   updateHUD();
 }
@@ -3324,6 +3338,17 @@ function updateHUD() {
   setActive('btn-left-light', Game.lights.left);
   setActive('btn-right-light', Game.lights.right);
   setActive('btn-monitor', Game.monitorOpen);
+
+  /* Com o monitor aberto: esconde portas e luzes (PC e celular); só o botão do monitor fica */
+  var monOpen = !!Game.monitorOpen;
+  document.getElementById('game').classList.toggle('monitor-visible', monOpen);
+  if (_hudCache.__monHide !== monOpen) {
+    _hudCache.__monHide = monOpen;
+    ['btn-left-door', 'btn-right-door', 'btn-left-light', 'btn-right-light'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', monOpen);
+    });
+  }
 }
 
 var _starting = false;
@@ -3340,7 +3365,7 @@ function startNight() {
   } finally { _starting = false; }
 }
 function _startNightCore() {
-  if (Mode.current === 'mobile') tryLockLandscape();
+  /* Não entra em fullscreen automaticamente: evita zoom/corte ao girar o celular. */
   Game.running = true;
   Game.paused = false;
   NA.init();
@@ -3348,15 +3373,17 @@ function _startNightCore() {
   Game.lastFrame = performance.now();
   Game.hour = 0; Game.hourProgress = 0;
   Game.power = 100; Game.usage = 1;
+  Game.lights.left = Game.lights.right = false;
+  Game.doors.left = Game.doors.right = false;
+  Game.monitorOpen = false;
+  document.getElementById('game').classList.remove('monitor-visible');
   Game.flickerNext = 6;
   perfReset();
   getDoorLedMat('left'); getDoorLedMat('right');
   var mob = Mode.current === 'mobile';
-  var lowGfx = (Gfx.level === 'low');
-  renderer.shadowMap.autoUpdate = !mob && !lowGfx;
+  renderer.shadowMap.autoUpdate = !mob;
   renderer.shadowMap.needsUpdate = true;
-  if (mob || lowGfx) freezeStaticScene();
-  if (typeof gfxApplyLowPerf === 'function') gfxApplyLowPerf();
+  if (mob) freezeStaticScene();
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('hud').classList.remove('hidden');
   document.getElementById('controls').classList.remove('hidden');
@@ -3368,7 +3395,6 @@ function _startNightCore() {
 
 function update(dt) {
   if (Game.over) { phoneKill(); NS.jumpUpdate(dt); return; }
-  var _lowGfx = (Gfx.level === 'low');
   Game.ambientTime += dt;
 
   Game.hourProgress += dt / Game.HOUR_DURATION;
@@ -3401,36 +3427,24 @@ function update(dt) {
     group.position.y = doorH * (2 - cur);
   });
 
-  /* Luzes funcionais das portas: sempre ativas (jogabilidade). Em BAIXOS: set direto, sem lerp/sin por quadro */
+  /* Luzes funcionais das portas: sempre ativas (mantidas em BAIXOS, pois são jogabilidade) */
   var targetL = Game.lights.left ? 1.4 : 0;
   var targetR = Game.lights.right ? 1.4 : 0;
-  if (objs.corrLightLeft) {
-    if (_lowGfx) objs.corrLightLeft.intensity = targetL;
-    else objs.corrLightLeft.intensity += (targetL - objs.corrLightLeft.intensity) * dt * 20;
-  }
-  if (objs.corrLightRight) {
-    if (_lowGfx) objs.corrLightRight.intensity = targetR;
-    else objs.corrLightRight.intensity += (targetR - objs.corrLightRight.intensity) * dt * 20;
-  }
+  if (objs.corrLightLeft) objs.corrLightLeft.intensity += (targetL - objs.corrLightLeft.intensity) * dt * 20;
+  if (objs.corrLightRight) objs.corrLightRight.intensity += (targetR - objs.corrLightRight.intensity) * dt * 20;
   /* Luzes de fundo: decorativas — desativadas em BAIXOS */
   if (objs.corrBackLightLeft) {
-    if (_lowGfx) objs.corrBackLightLeft.intensity = 0;
-    else {
-      var tBL = Game.lights.left ? 0.7 : 0;
-      objs.corrBackLightLeft.intensity += (tBL - objs.corrBackLightLeft.intensity) * dt * 20;
-    }
+    var tBL = (Gfx.level === 'low') ? 0 : (Game.lights.left ? 0.7 : 0);
+    objs.corrBackLightLeft.intensity += (tBL - objs.corrBackLightLeft.intensity) * dt * 20;
   }
   if (objs.corrBackLightRight) {
-    if (_lowGfx) objs.corrBackLightRight.intensity = 0;
-    else {
-      var tBR = Game.lights.right ? 0.7 : 0;
-      objs.corrBackLightRight.intensity += (tBR - objs.corrBackLightRight.intensity) * dt * 20;
-    }
+    var tBR = (Gfx.level === 'low') ? 0 : (Game.lights.right ? 0.7 : 0);
+    objs.corrBackLightRight.intensity += (tBR - objs.corrBackLightRight.intensity) * dt * 20;
   }
 
-  /* Brilho da Área de Refeições: apagado em BAIXOS / câmeras */
-  if (NS.dg && !_lowGfx) {
-    var dgT = (Game.monitorOpen && NS.on) ? 0 : 1;
+  /* Brilho tênue da Área de Refeições: apagado nas câmeras e em BAIXOS */
+  if (NS.dg) {
+    var dgT = (Gfx.level === 'low' || (Game.monitorOpen && NS.on)) ? 0 : 1;
     for (var dgI = 0; dgI < NS.dg.length; dgI++) {
       var dgL = NS.dg[dgI];
       dgL.intensity += (dgT * dgL.userData.base - dgL.intensity) * Math.min(1, dt * 20);
@@ -3441,7 +3455,7 @@ function update(dt) {
     var on = Game.lights[side];
     var bulbs = objs['corr_bulbs_' + side] || [];
     for (var i = 0; i < bulbs.length; i++) {
-      bulbs[i].material.emissiveIntensity = on ? 2.0 : 0.5;
+      bulbs[i].material.emissiveIntensity = on ? 2.0 : 0;
     }
   });
 
@@ -3450,24 +3464,14 @@ function update(dt) {
     var halo = objs['door_halo_' + side];
     var dLight = objs['door_light_' + side];
     if (Game.doors[side]) {
-      if (_lowGfx) {
-        /* Sem pulso senoidal por frame — brilho fixo */
-        if (led) { var cm = getDoorLedMat(side); cm.emissiveIntensity = 2.2; if (led.material !== cm) led.material = cm; }
-        if (halo) halo.intensity = 0.75;
-        if (dLight) dLight.intensity = 0.55;
-      } else {
-        var pulse = 0.7 + Math.sin(Game.ambientTime * 4) * 0.3;
-        if (led) { var cm2 = getDoorLedMat(side); cm2.emissiveIntensity = 2.5 * pulse; if (led.material !== cm2) led.material = cm2; }
-        if (halo) halo.intensity = 0.9 * pulse;
-        if (dLight) dLight.intensity += (0.7 - dLight.intensity) * dt * 4;
-      }
+      var pulse = 0.7 + Math.sin(Game.ambientTime * 4) * 0.3;
+      if (led) { var cm = getDoorLedMat(side); cm.emissiveIntensity = 2.5 * pulse; if (led.material !== cm) led.material = cm; }
+      if (halo) halo.intensity = 0.9 * pulse;
+      if (dLight) dLight.intensity += (0.7 - dLight.intensity) * dt * 4;
     } else {
       if (led && led.material !== MAT.ledRed) led.material = MAT.ledRed;
       if (halo) halo.intensity = 0.4;
-      if (dLight) {
-        if (_lowGfx) dLight.intensity = 0;
-        else dLight.intensity += (0 - dLight.intensity) * dt * 4;
-      }
+      if (dLight) dLight.intensity += (0 - dLight.intensity) * dt * 4;
     }
   });
 
@@ -3552,19 +3556,13 @@ function update(dt) {
 
   phoneUpdate(dt);
   NS.update(dt);
-  if (_lowGfx) {
-    Perf.lowSkipHud = (Perf.lowSkipHud || 0) + 1;
-    if (Perf.lowSkipHud >= 2) { Perf.lowSkipHud = 0; updateHUD(); }
-  } else {
-    updateHUD();
-  }
+  updateHUD();
 }
 
 function loop(now) {
   if (!Game.running) return;
   if (Game.paused) { Game.lastFrame = now; requestAnimationFrame(loop); return; }
   var mobile = Mode.current === 'mobile';
-  var low = (Gfx.level === 'low');
 
   {
     if (Perf.hz === 0) {
@@ -3572,14 +3570,8 @@ function loop(now) {
       if (gap > 0 && gap < 50) { Perf.hzSum += gap; Perf.hzN++; }
       if (Perf.hzN >= 45) { Perf.hz = 1000 / (Perf.hzSum / Perf.hzN); Perf.cap = Perf.hz >= 110; }
     }
-    /* BAIXOS: ritmo ~30 FPS estável (mais liso em aparelhos fracos). Outros modos: cap 60 se o ecrã for 120+. */
-    if (low) {
-      var stepL = 1000 / Perf.LOW_CAP_HZ;
-      if (Perf.nextT === 0) Perf.nextT = now;
-      if (now < Perf.nextT - 1) { requestAnimationFrame(loop); return; }
-      Perf.nextT += stepL;
-      if (Perf.nextT < now - stepL) Perf.nextT = now;
-    } else if (Perf.cap) {
+    /* Em BAIXOS, não aplica cap de FPS — permite aproveitar taxas de atualização mais altas */
+    if (Perf.cap && Gfx.level !== 'low') {
       var step = 1000 / Perf.CAP_HZ;
       if (Perf.nextT === 0) Perf.nextT = now;
       if (now < Perf.nextT - 1) { requestAnimationFrame(loop); return; }
@@ -3593,22 +3585,22 @@ function loop(now) {
   Game.lastFrame = now;
   update(dt);
 
-  /* Matrizes: só objetos dinâmicos quando a cena estática está congelada (BAIXOS / mobile) */
-  if (Perf.frozen) {
+  if (mobile) {
     for (var d = 0; d < Perf.dyn.length; d++) Perf.dyn[d].updateMatrixWorld(true);
-  }
-  if (mobile && gfxCfg().shadows) {
-    Perf.shadowAcc += dt;
-    var moving = Game.doorAnim.left !== Game.doorTarget.left || Game.doorAnim.right !== Game.doorTarget.right;
-    if (moving || Perf.wasMoving || Perf.shadowAcc >= 1 / Perf.SHADOW_HZ - 0.004) {
-      renderer.shadowMap.needsUpdate = true;
-      Perf.shadowAcc = 0;
+    if (gfxCfg().shadows) {
+      Perf.shadowAcc += dt;
+      var moving = Game.doorAnim.left !== Game.doorTarget.left || Game.doorAnim.right !== Game.doorTarget.right;
+      if (moving || Perf.wasMoving || Perf.shadowAcc >= 1 / Perf.SHADOW_HZ - 0.004) {
+        renderer.shadowMap.needsUpdate = true;
+        Perf.shadowAcc = 0;
+      }
+      Perf.wasMoving = moving;
     }
-    Perf.wasMoving = moving;
   }
-  /* Resolução dinâmica — só em BAIXOS */
+  /* Resolução dinâmica 75%→50% — só em BAIXOS, em qualquer plataforma */
   adaptResolution(frameMs);
 
+  /* Degradês de sombra: um único upload por quadro se algum animatrônico se moveu */
   if (FS.on && FS.needsUpload) {
     FS.attr.needsUpdate = true;
     FS.needsUpload = false;
@@ -5334,9 +5326,14 @@ function nui() {
   var sx = function (v) { return (v + 13.2) * 10; }, sz = function (v) { return (v + 14.2) * 10; }, svg = '<svg viewBox="0 0 264 240">';
   Object.keys(MAP.rooms).forEach(function (k) { var r = MAP.rooms[k]; svg += '<rect class="rm" x="' + sx(r[0]) + '" y="' + sz(r[1]) + '" width="' + (r[2] - r[0]) * 10 + '" height="' + (r[3] - r[1]) * 10 + '"/>'; });
   MAP.cams.forEach(function (c, i) { svg += '<g class="mk" data-i="' + i + '"><circle cx="' + sx(c.p[0]) + '" cy="' + sz(c.p[2]) + '" r="4.2"/><text x="' + sx(c.p[0]) + '" y="' + (sz(c.p[2]) + 1.5) + '">' + c.id + '</text></g>'; });
-  ui.innerHTML = '<div id="cam-view"></div><div id="cam-fx"></div><div id="cam-label"></div><div id="cam-map">' + svg + '</svg></div>';
+  ui.innerHTML = '<div id="cam-view"></div><div id="cam-fx"></div><div id="cam-label"></div><div id="cam-map">' + svg + '</svg></div><div id="cam-mobile-nav"><button type="button" id="cam-prev" aria-label="Câmera anterior">◀</button><button type="button" class="cam-current" id="cam-current">CAM 1</button><button type="button" id="cam-next" aria-label="Próxima câmera">▶</button></div>';
   document.getElementById('game').appendChild(ui);
   NS.ui = ui; NS.view = ui.querySelector('#cam-view'); NS.label = ui.querySelector('#cam-label');
+  function stepCamera(delta) { if (!NS.on || !Game.monitorOpen) return; NS.select((NS.act + delta + MAP.cams.length) % MAP.cams.length); }
+  ui.querySelector('#cam-prev').addEventListener('pointerdown', function(e) { e.preventDefault(); e.stopPropagation(); stepCamera(-1); });
+  ui.querySelector('#cam-next').addEventListener('pointerdown', function(e) { e.preventDefault(); e.stopPropagation(); stepCamera(1); });
+  ui.querySelector('#cam-current').addEventListener('pointerdown', function(e) { e.preventDefault(); e.stopPropagation(); stepCamera(1); });
+
   ui.querySelectorAll('.mk').forEach(function (g) {
     g.addEventListener('pointerdown', function (e) { e.stopPropagation(); if (e.pointerType === 'mouse' && e.button !== 0) return; NS.select(+g.getAttribute('data-i')); });
   });
@@ -5366,6 +5363,7 @@ function nwrapAng(a) { while (a > Math.PI) a -= 6.283185307179586; while (a < -M
 
 NS.select = function (i) {
   NS.act = i; var c = MAP.cams[i];
+  var mobileCamLabel = document.getElementById('cam-current'); if (mobileCamLabel) mobileCamLabel.textContent = 'CAM ' + c.id;
   MAP.cams.forEach(function (k, j) { if (k.body) k.body.visible = !(NS.on && j === i); });
   NS.label.innerHTML = '<i>●</i> CAM ' + c.id + '<small>' + c.n + ' · SINAL <span id="cam-sig">OK</span></small>';
   NS.ui.querySelectorAll('.mk').forEach(function (g, k) { g.classList.toggle('sel', k === i); });
